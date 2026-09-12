@@ -117,6 +117,10 @@ curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/m
 > sudo bash install.sh --ref v1.1.0
 > ```
 
+> `raw.githubusercontent.com` may serve a cached copy for a few minutes after a
+> push. If you want the exact published release instead of whatever `main`
+> currently looks like, pin it with `--ref v1.1.0`.
+
 ### What the installer does either way
 
 It checks root / docker / Coolify, fetches the files if needed, installs `age`,
