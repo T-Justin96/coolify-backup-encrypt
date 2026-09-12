@@ -454,6 +454,9 @@ private key, or keep the key. Coolify will keep writing plaintext backups again.
 - `age` provides authenticated encryption. There is no symmetric fallback and no
   `gpg` mode: the host is only ever given a public key, which keeps the
   "encrypt only" guarantee simple to reason about.
+- The installer prints your host name in the "copy the private key" hint, so
+  that output lands in your terminal scrollback and journals. Check before
+  pasting it into a public issue.
 - The script never writes to the Coolify database and never modifies Coolify.
 - Never paste private keys, identities, or decrypted dumps into a public issue.
 

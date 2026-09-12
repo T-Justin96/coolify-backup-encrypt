@@ -10,6 +10,8 @@ Not a formal standard, just a short history.
   install output.
 - The post-install summary is now English, shorter and says where the files
   ended up and how to look at them.
+- The copy-the-key hint uses the short host name instead of the fully qualified
+  one, so the installer output no longer carries your domain.
 
 ## 1.1.0 - 2026-09
 

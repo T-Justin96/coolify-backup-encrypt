@@ -398,7 +398,9 @@ EOF
 
 print_final_warning() {
     local host
-    host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo YOUR-SERVER)"
+    # Short host name on purpose: the fully qualified name would put your
+    # domain into terminal logs and issue reports.
+    host="$(hostname 2>/dev/null || echo YOUR-SERVER)"
 
     if [ ! -f "$GRAB_IDENTITY" ]; then
         cat <<EOF
