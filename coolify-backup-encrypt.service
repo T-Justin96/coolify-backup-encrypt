@@ -1,0 +1,18 @@
+[Unit]
+Description=Encrypt Coolify backup files in place
+Documentation=https://github.com/T-Justin96/coolify-backup-encrypt
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coolify-backup-encrypt.sh
+# The script exits non-zero when the Coolify schema changed, the key is gone,
+# disk is full, ... This makes the failure visible instead of silently
+# encrypting nothing. Check with: systemctl --failed
+OnFailure=coolify-backup-encrypt-alert.service
+# Reduce impact on the host.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+

@@ -1,0 +1,17 @@
+# Never commit keys, identities or real configs.
+*.conf
+!coolify-backup-encrypt.conf.example
+*.key
+*.asc
+identity.txt
+.env
+
+# Leftovers of interrupted runs.
+*.tmp
+*.tmp.*
+
+# Decrypted output of --decrypt / --decrypt-to
+restore.*
+
+# Suggested scp target for the private key (install.sh warning)
+backup-identity.txt

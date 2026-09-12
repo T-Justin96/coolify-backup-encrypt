@@ -1,0 +1,39 @@
+# /etc/coolify-backup-encrypt.conf
+# ---------------------------------------------------------------------------
+# Configuration for /usr/local/bin/coolify-backup-encrypt.sh
+#
+# Every value below is also the built-in default, so this file is optional -
+# except AGE_RECIPIENT, which is required.
+#
+# Quickest way to get a working file:  run ./install.sh
+# ---------------------------------------------------------------------------
+
+# --- Coolify / database -----------------------------------------------------
+COOLIFY_ENV_FILE=/data/coolify/source/.env
+DB_CONTAINER=coolify-db
+BACKUP_ROOT=/data/coolify/backups
+
+# --- Encryption (age, public key only) --------------------------------------
+# The PUBLIC key. This host can only encrypt with it, never decrypt.
+# Extract it from an existing key pair with:  age-keygen -y <identity-file>
+AGE_RECIPIENT=
+
+# Path to the PRIVATE key. Only needed on the machine that DECRYPTS, i.e. for
+# `--decrypt` / `--decrypt-to`. Deliberately absent on the Coolify host.
+AGE_IDENTITY=/etc/coolify-backup-encrypt/age/identity.txt
+
+# Used by install.sh: the private key it bootstrapped on this host. Delete it
+# with `coolify-backup-encrypt.sh --finalize` once you have copied it away and
+# verified that the copy decrypts.
+GRAB_IDENTITY=/root/GRAB-ME-BEFORE-DELETE-identity.txt
+
+# --- Behaviour --------------------------------------------------------------
+GRACE_SECONDS=5
+MAGIC=COOLIFYENC1
+MAX_LOAD=0
+LOCK_FILE=/run/coolify-backup-encrypt.lock
+TMP_MAX_AGE_MINUTES=60
+
+# NOTE: this script reads Coolify's INTERNAL tables. After every Coolify
+# upgrade run:  coolify-backup-encrypt.sh --check-schema
+# It exits non-zero when a table/column the script depends on is gone.

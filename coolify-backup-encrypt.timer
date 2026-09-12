@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Coolify backup encryption every 10 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=coolify-backup-encrypt.service
+
+[Install]
+WantedBy=timers.target

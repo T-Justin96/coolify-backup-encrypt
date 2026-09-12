@@ -1,0 +1,7 @@
+[Unit]
+Description=Log an alert when coolify-backup-encrypt fails
+Documentation=https://github.com/T-Justin96/coolify-backup-encrypt
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'logger -t coolify-backup-encrypt "ALERT: backup encryption failed (schema change, key, disk, ...) - run: journalctl -u coolify-backup-encrypt.service -n 50"'

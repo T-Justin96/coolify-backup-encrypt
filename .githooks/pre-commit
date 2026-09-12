@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Optional local guard - no CI needed.
+# Enable once per clone:   git config core.hooksPath .githooks
+set -e
+
+for f in coolify-backup-encrypt.sh coolify-backup-encrypt.selftest.sh; do
+    bash -n "$f"
+done
+
+bash coolify-backup-encrypt.selftest.sh
