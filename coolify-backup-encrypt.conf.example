@@ -34,6 +34,10 @@ MAX_LOAD=0
 LOCK_FILE=/run/coolify-backup-encrypt.lock
 TMP_MAX_AGE_MINUTES=60
 
+# Where the script remembers which backups are not on this host, so the journal
+# does not get one line per missing file per run.
+STATE_DIR=/run
+
 # NOTE: this script reads Coolify's INTERNAL tables. After every Coolify
 # upgrade run:  coolify-backup-encrypt.sh --check-schema
 # It exits non-zero when a table/column the script depends on is gone.

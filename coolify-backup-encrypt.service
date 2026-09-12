@@ -7,10 +7,13 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/coolify-backup-encrypt.sh
-# The script exits non-zero when the Coolify schema changed, the key is gone,
-# disk is full, ... This makes the failure visible instead of silently
-# encrypting nothing. Check with: systemctl --failed
+# The script exits non-zero when an encryption actually failed, when a backup
+# path fell outside BACKUP_ROOT, or when the Coolify schema changed. Without
+# that, OnFailure would never fire and nobody would notice that backups quietly
+# stopped being encrypted. Check with: systemctl --failed
 OnFailure=coolify-backup-encrypt-alert.service
+# The script stays silent when there is nothing to do, so the journal (and this
+# alert) only show things that actually need attention.
 # Reduce impact on the host.
 Nice=10
 IOSchedulingClass=best-effort

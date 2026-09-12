@@ -217,7 +217,7 @@ need_pkg() {
 }
 
 install_deps() {
-    local packages=""
+    local packages="" apt_log=""
 
     need_pkg age && packages="${packages} age"
     need_pkg flock && packages="${packages} util-linux"
@@ -232,9 +232,24 @@ install_deps() {
 
     if command -v apt-get >/dev/null 2>&1; then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq || die "apt-get update failed"
+        # Keep needrestart from interrupting or printing a scan report.
+        export NEEDRESTART_MODE=a
+        export NEEDRESTART_SUSPEND=1
+
+        apt_log="$(mktemp 2>/dev/null || echo /dev/null)"
+        # Not fatal: with a stale index apt can still install from the cache.
+        if ! apt-get update -qq 2>"$apt_log"; then
+            warn "apt-get update did not fully succeed, trying to install anyway"
+            if grep -q "could not create temporary file\|Couldn't create temporary file" "$apt_log" 2>/dev/null; then
+                warn "apt cannot create temporary files in /tmp - that is a problem with THIS HOST,"
+                warn "not with this installer. Check with:"
+                warn "  df -h /tmp / ; df -i /tmp / ; ls -ld /tmp ; mount | grep -w /tmp"
+            fi
+        fi
+        rm -f -- "$apt_log"
+
         # shellcheck disable=SC2086
-        apt-get install -y -qq $packages || die "apt-get install failed"
+        apt-get install -y -qq $packages || die "apt-get install failed for:${packages}"
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y $packages || die "dnf install failed"
     elif command -v yum >/dev/null 2>&1; then
@@ -264,6 +279,14 @@ install -d -m 0700 "$CONF_DIR"
 # -----------------------------------------------------------------------------
 # 6. age key pair
 # -----------------------------------------------------------------------------
+# An existing config already pins the key that backups are encrypted to. Minting
+# a fresh key pair here would hand you a key that does NOT match it: old backups
+# stay unreadable and the new "backup" of the key is worthless.
+configured_recipient=""
+if [ -f "$CONF" ]; then
+    configured_recipient="$(sed -n 's/^AGE_RECIPIENT=//p' "$CONF" | head -n1)"
+fi
+
 if [ -n "$RECIPIENT" ]; then
     case "$RECIPIENT" in
         age1*) : ;;
@@ -274,6 +297,36 @@ elif [ -f "$GRAB_IDENTITY" ]; then
     log "Reusing the existing private key at ${GRAB_IDENTITY}"
     chmod 600 "$GRAB_IDENTITY" 2>/dev/null || true
     RECIPIENT="$(age-keygen -y "$GRAB_IDENTITY")" || die "cannot read recipient from ${GRAB_IDENTITY}"
+elif [ -n "$configured_recipient" ] && [ "$FORCE" -ne 1 ]; then
+    cat >&2 <<EOF
+
+[install] ERROR: refusing to continue, this would break your backups.
+
+  ${CONF} already encrypts to this recipient:
+
+      ${configured_recipient}
+
+  There is no private key on this host (already finalized), so generating a new
+  one now would produce a key that does NOT match that recipient. Your existing
+  backups would stay unreadable and the new key would be useless.
+
+  Pick one:
+
+    a) Keep using the existing key - copy its identity back and run:
+
+         $0 --recipient ${configured_recipient}
+
+    b) Really start over on this host. Only if you accept that backups already
+       encrypted with the old recipient can never be read again:
+
+         $0 --force
+
+  To only update the script and the systemd units, use:
+
+         ${SCRIPT_NAME}.sh --update
+
+EOF
+    exit 1
 else
     log "Generating an age key pair"
     umask 077
@@ -385,11 +438,16 @@ print_paths_and_checks() {
 
  Check on it
  -----------
-   journalctl -u ${SCRIPT_NAME}.service -n 30    recent runs
+   ${SCRIPT_NAME}.sh --status                    everything at a glance
+   journalctl -u ${SCRIPT_NAME}.service -n 30    recent runs (silent when idle)
    ${SCRIPT_NAME}.sh --dry-run                   show what would be encrypted
    ${SCRIPT_NAME}.sh --check-schema              after every Coolify upgrade
    systemctl --failed                            did anything break?
-   systemctl list-timers ${SCRIPT_NAME}.timer
+
+ Maintain it
+ -----------
+   ${SCRIPT_NAME}.sh --update                    newest script + units, keeps config/keys
+   ${SCRIPT_NAME}.sh --uninstall                 remove it all (backup files are kept)
 
  Documentation: https://github.com/${REPO_SLUG}
 
@@ -450,7 +508,11 @@ EOF
    4. Prove the copy works, with a real backup file, on your machine:
 
         tail -c +13 <backup-file> | age --decrypt --identity ./backup-identity.txt > restore.dmp
-        pg_restore --list restore.dmp
+        head -c 5 restore.dmp        # must print: PGDMP
+
+      No pg_restore needed. If the script is on that machine too:
+
+        ${SCRIPT_NAME}.sh --verify <backup-file> --identity ./backup-identity.txt
 
    5. Only once step 4 works, delete the key from this server:
 

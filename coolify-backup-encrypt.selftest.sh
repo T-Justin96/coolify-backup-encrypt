@@ -77,6 +77,9 @@ prepare_work() { # $1 = workdir
         echo "GRACE_SECONDS=0"
         echo "MAX_LOAD=0"
         echo "LOCK_FILE=$w/lock"
+        echo "STATE_DIR=$w/state"
+        echo "AGE_IDENTITY=$w/no-such-identity.txt"
+        echo "SYSTEMD_DIR=$w/systemd"
     } > "$w/conf"
 }
 
@@ -104,7 +107,7 @@ configure_crypt() { # $1 = workdir
 
 # dry-run -> in-place encrypt -> idempotency -> decrypt roundtrip -> decrypt-to
 run_age_case() {
-    local w orig_size size1 size2
+    local w orig_size size1 size2 quiet_out
 
     w="$(mktemp -d)"
     prepare_work "$w"
@@ -160,10 +163,15 @@ run_age_case() {
     fi
 
     size1="$(wc -c < "$w/dump.dmp")"
-    bash "$SCRIPT" >/dev/null 2>&1
+    quiet_out="$(bash "$SCRIPT" 2>&1)"
     size2="$(wc -c < "$w/dump.dmp")"
     if [ "$size1" != "$size2" ]; then
         fail "not idempotent (file changed on the second run)"
+        rm -rf "$w"
+        return 1
+    fi
+    if [ -n "$quiet_out" ]; then
+        fail "a pass with nothing to do was not silent (journal spam): ${quiet_out}"
         rm -rf "$w"
         return 1
     fi
@@ -302,6 +310,144 @@ run_cleanup_case() {
     return 0
 }
 
+# Files that live on another server must be reported once, not on every pass.
+run_missing_dedupe_case() {
+    local w out1 out2
+
+    w="$(mktemp -d)"
+    prepare_work "$w"
+    echo "== case: missing files are reported once, not every pass =="
+    configure_crypt "$w"
+
+    printf '%s\n%s\n' "$w/dump.dmp" "$w/gone.dmp" > "$w/filenames"
+
+    PATH="$w/bin:$PATH"
+    FAKE_FILENAMES="$w/filenames"
+    CONF_FILE="$w/conf"
+    export PATH FAKE_FILENAMES CONF_FILE
+
+    out1="$(bash "$SCRIPT" 2>&1)"
+    out2="$(bash "$SCRIPT" 2>&1)"
+
+    if ! printf '%s' "$out1" | grep -q 'NOT ON THIS HOST'; then
+        fail "first pass did not report the file that is not on this host"
+        rm -rf "$w"
+        return 1
+    fi
+    if printf '%s' "$out2" | grep -q 'NOT ON THIS HOST'; then
+        fail "second pass reported it again - that is the journal spam we removed"
+        rm -rf "$w"
+        return 1
+    fi
+
+    echo "   PASS (reported once, silent afterwards)"
+    rm -rf "$w"
+    return 0
+}
+
+# A real failure has to reach systemd, otherwise OnFailure never fires.
+run_failure_exit_case() {
+    local w rc
+
+    w="$(mktemp -d)"
+    prepare_work "$w"
+    echo "== case: a path outside BACKUP_ROOT fails the run =="
+    configure_crypt "$w"
+
+    printf '%s\n' "/tmp/definitely-not-a-backup-root/evil.dmp" > "$w/filenames"
+
+    PATH="$w/bin:$PATH"
+    FAKE_FILENAMES="$w/filenames"
+    CONF_FILE="$w/conf"
+    export PATH FAKE_FILENAMES CONF_FILE
+
+    bash "$SCRIPT" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "a path outside BACKUP_ROOT exited 0 - OnFailure would never fire"
+        rm -rf "$w"
+        return 1
+    fi
+
+    echo "   PASS (exit ${rc}, visible to systemd)"
+    rm -rf "$w"
+    return 0
+}
+
+run_verify_case() {
+    local w rc stub recipient
+
+    w="$(mktemp -d)"
+    prepare_work "$w"
+    echo "== case: --verify =="
+    configure_crypt "$w"
+    stub="$AGE_STUB"
+
+    # Point AGE_IDENTITY at nothing so the container checks are deterministic:
+    # --verify must be able to judge a file without having a key at all.
+    echo "AGE_IDENTITY=$w/no-such-identity.txt" >> "$w/conf"
+
+    PATH="$w/bin:$PATH"
+    CONF_FILE="$w/conf"
+    export PATH CONF_FILE
+
+    { printf '%s\n' "$MAGIC"; printf 'PGDMP\000\001\002\003payload'; } > "$w/pg.dmp"
+
+    bash "$SCRIPT" --verify "$w/pg.dmp" > "$w/ok.log" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "--verify rejected a file with a valid header (exit ${rc}): $(cat "$w/ok.log")"
+        rm -rf "$w"
+        return 1
+    fi
+    if ! grep -q 'PGDMP' "$w/ok.log"; then
+        fail "--verify did not recognise the PGDMP payload"
+        rm -rf "$w"
+        return 1
+    fi
+
+    printf 'not encrypted\n' > "$w/plain.dmp"
+    if bash "$SCRIPT" --verify "$w/plain.dmp" >/dev/null 2>&1; then
+        fail "--verify accepted a file without the magic header"
+        rm -rf "$w"
+        return 1
+    fi
+
+    if bash "$SCRIPT" --verify "$w/does-not-exist" >/dev/null 2>&1; then
+        fail "--verify accepted a file that does not exist"
+        rm -rf "$w"
+        return 1
+    fi
+
+    if [ "$stub" -eq 0 ]; then
+        # Real crypto available: prove --verify actually decrypts, and that it
+        # fails with the wrong key. This is the claim the whole flag rests on.
+        recipient="$(sed -n 's/^AGE_RECIPIENT=//p' "$w/conf" | head -n1)"
+        printf 'PGDMP\000\001\002\003real payload\n' > "$w/body.dmp"
+        { printf '%s\n' "$MAGIC"; age --encrypt --recipient "$recipient" < "$w/body.dmp"; } > "$w/real.enc"
+
+        bash "$SCRIPT" --verify "$w/real.enc" --identity "$w/agekey.txt" > "$w/real.log" 2>&1
+        if [ $? -ne 0 ]; then
+            fail "--verify failed on a file encrypted with the matching key: $(cat "$w/real.log")"
+            rm -rf "$w"
+            return 1
+        fi
+
+        if bash "$SCRIPT" --verify "$w/real.enc" --identity "$w/pg.dmp" >/dev/null 2>&1; then
+            fail "--verify claimed success with a wrong identity"
+            rm -rf "$w"
+            return 1
+        fi
+
+        echo "   PASS (PGDMP detected, header+existence checked, real decrypt OK, wrong key rejected)"
+    else
+        echo "   PASS (PGDMP detected, header and existence checked; real decrypt needs age)"
+    fi
+
+    rm -rf "$w"
+    return 0
+}
+
 run_cli_case() {
     echo "== case: --help / --version =="
 
@@ -382,6 +528,9 @@ run_age_case
 run_schema_guard_case
 run_cleanup_case
 run_finalize_case
+run_verify_case
+run_failure_exit_case
+run_missing_dedupe_case
 
 if [ "$FAILED" -eq 0 ]; then
     echo "ALL TESTS PASSED"
