@@ -2,6 +2,14 @@
 
 Not a formal standard, just a short history.
 
+## 1.1.0 - 2026-09
+
+- `install.sh` works standalone now: `curl ... | sudo bash`. It downloads the
+  script and the systemd units from the repository, so no git checkout is needed.
+  `--ref <branch|tag|commit>` pins a version instead of following `main`.
+- `install.sh --help` no longer depends on reading its own file, so it works when
+  piped into bash.
+
 ## 1.0.0 - 2026-09
 
 - Initial release.
@@ -17,4 +25,6 @@ Not a formal standard, just a short history.
 - `--decrypt` / `--decrypt-to` for manual restores.
 - `--finalize` deletes the temporary private key left behind by `install.sh`.
 - `install.sh`: one-command setup (deps, key pair, config, systemd, warning).
+- `install.sh` also works standalone via `curl | sudo bash`: it downloads the
+  script and the systemd units from the repository (`--ref` to pin a version).
 - Verified against Coolify v4.3.19.

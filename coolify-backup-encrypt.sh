@@ -65,7 +65,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 CONF_FILE="${CONF_FILE:-/etc/coolify-backup-encrypt.conf}"
 if [ -f "$CONF_FILE" ]; then

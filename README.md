@@ -87,22 +87,46 @@ private key safe, or if you will never test a restore.
 
 ## Install
 
-Two ways: the automated installer, or the manual steps where the private key
-never touches the host at all.
-
-### Option A - automated installer (`age`)
+### The one-liner (no checkout, no git)
 
 ```bash
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh | sudo bash
 ```
 
-It checks root / docker / Coolify, installs `age`, copies the script, writes
+It downloads the remaining files itself, so nothing has to be cloned. Options go
+through the pipe:
+
+```bash
+# do not start the timer yet
+curl -fsSL <url> | sudo bash -s -- --no-enable
+
+# bring your own public key - nothing is generated on the host, nothing to finalize
+curl -fsSL <url> | sudo bash -s -- --recipient age1...
+
+# pin a version instead of following main
+curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh \
+  | sudo bash -s -- --ref v1.1.0
+```
+
+> Piping a script into a root shell means trusting it blindly. If that bothers
+> you, download it, read it, then run it:
+>
+> ```bash
+> curl -fsSLO https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh
+> less install.sh
+> sudo bash install.sh --ref v1.1.0
+> ```
+
+### What the installer does either way
+
+It checks root / docker / Coolify, fetches the files if needed, installs `age`,
+copies the script to `/usr/local/bin/`, writes
 `/etc/coolify-backup-encrypt.conf`, generates an age key pair, installs the
 systemd units, runs `--check-schema` and `--dry-run`, and starts the timer.
 
 **Read this:** it generates the key pair *on the host*, so the private key sits
-at `/root/GRAB-ME-BEFORE-DELETE-identity.txt` until you delete it. The installer
-prints a large warning; the intended flow is:
+at `/root/GRAB-ME-BEFORE-DELETE-identity.txt` until you delete it. It prints a
+large warning; the intended flow is:
 
 1. copy the identity file to your own machine,
 2. store it in your password manager **and** on an offline medium,
@@ -110,7 +134,7 @@ prints a large warning; the intended flow is:
 4. then run `sudo coolify-backup-encrypt.sh --finalize` on the host.
 
 Until step 4 the host *can* decrypt. That is the trade-off for a one-command
-setup. If the private key must never touch the host, use Option B.
+setup. If the private key must never touch the host, use the manual install below.
 
 Installer flags:
 
@@ -119,9 +143,20 @@ Installer flags:
 | `--recipient age1...` | use your own public key; no key pair is generated on the host, so there is nothing to finalize |
 | `--no-enable` | install everything but do not start the timer |
 | `--force` | overwrite an existing `/etc/coolify-backup-encrypt.conf` |
+| `--ref <git ref>` | download this branch/tag/commit instead of `main` (same as `CBX_REF=...`) |
 | `--help` | usage |
 
-### Option B - manual install (private key stays offline)
+### From a clone
+
+```bash
+git clone https://github.com/T-Justin96/coolify-backup-encrypt
+cd coolify-backup-encrypt
+sudo ./install.sh
+```
+
+Run from a checkout, the installer just uses the files next to it — no download.
+
+### Manual install (private key stays offline)
 
 Everything below runs as root on the Coolify host.
 

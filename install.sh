@@ -3,16 +3,24 @@
 #
 # install.sh - automated installer for coolify-backup-encrypt (age, public key)
 #
+# One command, no checkout needed:
+#
+#   curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh | sudo bash
+#
+# Run standalone it downloads the remaining files from the repository; run from a
+# git clone it simply uses the files sitting next to this script.
+#
 # What it does
 # ------------
 #   1. root / docker / Coolify checks
-#   2. installs dependencies (age, util-linux, coreutils)
-#   3. installs the main script to /usr/local/bin/
-#   4. creates /etc/coolify-backup-encrypt/
-#   5. generates an age key pair, private key -> /root/GRAB-ME-BEFORE-DELETE-identity.txt
-#   6. writes /etc/coolify-backup-encrypt.conf (age, public key only)
-#   7. installs and enables the systemd service + timer
-#   8. prints a big warning telling you to copy the key away and then finalize
+#   2. fetches the remaining files (only when run standalone)
+#   3. installs dependencies (age, util-linux, coreutils)
+#   4. installs the main script to /usr/local/bin/
+#   5. creates /etc/coolify-backup-encrypt/
+#   6. generates an age key pair, private key -> /root/GRAB-ME-BEFORE-DELETE-identity.txt
+#   7. writes /etc/coolify-backup-encrypt.conf (age, public key only)
+#   8. installs and enables the systemd service + timer
+#   9. prints a big warning telling you to copy the key away and then finalize
 #
 # !! The private key exists on this host until you run:
 #        coolify-backup-encrypt.sh --finalize
@@ -23,12 +31,28 @@
 #   ./install.sh --recipient age1...   # use your own public key, no keypair generated
 #   ./install.sh --no-enable           # install only, do not start the timer
 #   ./install.sh --force               # rewrite an existing config
+#   ./install.sh --ref v1.0.0          # pull this git ref instead of main
 #   ./install.sh --help
+#
+# Every option also works through the pipe:
+#   curl -fsSL <url> | sudo bash -s -- --no-enable --ref v1.0.0
 #
 set -Eeuo pipefail
 
 SCRIPT_NAME="coolify-backup-encrypt"
-SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_SLUG="T-Justin96/coolify-backup-encrypt"
+REPO_RAW_URL="https://raw.githubusercontent.com/${REPO_SLUG}"
+CBX_REF="${CBX_REF:-main}"
+
+# Where do our own files live? When this script is piped into bash there is no
+# usable $0, which is exactly the standalone (curl | bash) case.
+SELF="${BASH_SOURCE[0]:-}"
+if [ -n "$SELF" ] && [ -r "$SELF" ]; then
+    SRC_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+else
+    SRC_DIR=""
+fi
+
 BIN="/usr/local/bin/${SCRIPT_NAME}.sh"
 CONF_DIR="/etc/${SCRIPT_NAME}"
 CONF="/etc/${SCRIPT_NAME}.conf"
@@ -57,7 +81,26 @@ die() {
 }
 
 usage() {
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+Install coolify-backup-encrypt (age, public key only) on a Coolify host.
+
+Usage:
+  ./install.sh                       generate a new key pair on this host
+  ./install.sh --recipient age1...   use your own public key, no keypair generated
+  ./install.sh --no-enable           install only, do not start the timer
+  ./install.sh --force               rewrite an existing config
+  ./install.sh --ref v1.0.0          pull this git ref instead of main
+  ./install.sh --help
+
+Standalone (no checkout needed):
+  curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh | sudo bash
+
+  Every option also works through the pipe:
+  curl -fsSL <url> | sudo bash -s -- --no-enable --ref v1.0.0
+
+Standalone mode downloads coolify-backup-encrypt.sh and the systemd units from
+the repository. Read the downstream script before piping anything into root.
+EOF
 }
 
 while [ "$#" -gt 0 ]; do
@@ -76,6 +119,11 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-enable)
             DO_ENABLE=0
+            ;;
+        --ref)
+            shift
+            [ "$#" -gt 0 ] || die "--ref needs a git ref (branch, tag or commit)"
+            CBX_REF="$1"
             ;;
         *)
             die "unknown option: $1"
@@ -104,14 +152,64 @@ docker inspect -f '{{.State.Running}}' "$DB_CONTAINER" 2>/dev/null | grep -q tru
 
 command -v systemctl >/dev/null 2>&1 || die "systemctl not found - systemd is required"
 
-for f in "${SCRIPT_NAME}.sh" "${SCRIPT_NAME}.service" "${SCRIPT_NAME}.timer" "${SCRIPT_NAME}-alert.service"; do
-    [ -f "${SRC_DIR}/${f}" ] || die "missing file next to install.sh: ${f}"
-done
-
 log "Checks passed"
 
 # -----------------------------------------------------------------------------
-# 2. Dependencies
+# 2. Source files (downloaded when this script is run standalone)
+# -----------------------------------------------------------------------------
+REQUIRED_FILES="${SCRIPT_NAME}.sh ${SCRIPT_NAME}.service ${SCRIPT_NAME}.timer ${SCRIPT_NAME}-alert.service"
+
+fetch_file() { # $1 = file name, $2 = destination
+    local name="$1" dest="$2" url="${REPO_RAW_URL}/${CBX_REF}/${1}"
+
+    log "Downloading ${name} (${CBX_REF})"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$dest" || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$dest" "$url" || return 1
+    else
+        die "need curl or wget to download ${name}"
+    fi
+
+    [ -s "$dest" ] || return 1
+    return 0
+}
+
+resolve_sources() {
+    local f have_all=1
+
+    if [ -n "$SRC_DIR" ]; then
+        for f in $REQUIRED_FILES; do
+            [ -f "${SRC_DIR}/${f}" ] || have_all=0
+        done
+    else
+        have_all=0
+    fi
+
+    if [ "$have_all" -eq 1 ]; then
+        log "Using the files next to install.sh (${SRC_DIR})"
+        return 0
+    fi
+
+    log "Standalone mode: not a checkout, fetching ${REPO_SLUG} @ ${CBX_REF}"
+    SRC_DIR="$(mktemp -d)" || die "mktemp failed"
+    trap 'rm -rf -- "$SRC_DIR"' EXIT
+
+    for f in $REQUIRED_FILES; do
+        fetch_file "$f" "${SRC_DIR}/${f}" \
+            || die "could not download '${f}' from ${REPO_RAW_URL}/${CBX_REF}/"
+    done
+
+    # Never install something that is not even valid bash.
+    bash -n "${SRC_DIR}/${SCRIPT_NAME}.sh" || die "downloaded ${SCRIPT_NAME}.sh is not valid bash"
+
+    log "Source files ready"
+}
+
+resolve_sources
+
+# -----------------------------------------------------------------------------
+# 3. Dependencies
 # -----------------------------------------------------------------------------
 need_pkg() {
     command -v "$1" >/dev/null 2>&1 && return 1
@@ -153,18 +251,18 @@ command -v age-keygen >/dev/null 2>&1 || die "age-keygen is still missing after 
 command -v flock >/dev/null 2>&1 || warn "flock is missing - concurrent runs cannot be prevented"
 
 # -----------------------------------------------------------------------------
-# 3. Main script
+# 4. Main script
 # -----------------------------------------------------------------------------
 log "Installing ${BIN}"
 install -m 0755 "${SRC_DIR}/${SCRIPT_NAME}.sh" "$BIN"
 
 # -----------------------------------------------------------------------------
-# 4. Directories
+# 5. Directories
 # -----------------------------------------------------------------------------
 install -d -m 0700 "$CONF_DIR"
 
 # -----------------------------------------------------------------------------
-# 5. age key pair
+# 6. age key pair
 # -----------------------------------------------------------------------------
 if [ -n "$RECIPIENT" ]; then
     case "$RECIPIENT" in
@@ -197,7 +295,7 @@ if [ -f "$GRAB_IDENTITY" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 6. Config
+# 7. Config
 # -----------------------------------------------------------------------------
 write_config() {
     local tmp="${CONF}.tmp.$$"
@@ -240,7 +338,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 7. systemd
+# 8. systemd
 # -----------------------------------------------------------------------------
 log "Installing systemd units"
 install -m 0644 "${SRC_DIR}/${SCRIPT_NAME}.service" "$SYSTEMD_DIR/"
@@ -261,7 +359,7 @@ log "Preflight: ${SCRIPT_NAME}.sh --dry-run"
 "$BIN" --dry-run || warn "--dry-run reported problems"
 
 # -----------------------------------------------------------------------------
-# 8. Enable the timer, then shout about the private key
+# 9. Enable the timer, then shout about the private key
 # -----------------------------------------------------------------------------
 if [ "$DO_ENABLE" -eq 1 ]; then
     systemctl enable --now "${SCRIPT_NAME}.timer" || die "could not enable the timer"
