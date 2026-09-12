@@ -314,7 +314,7 @@ AGE_RECIPIENT=${RECIPIENT}
 # Only needed on the machine that holds the private key (for --decrypt):
 # AGE_IDENTITY=/path/to/identity.txt
 
-# Used by `--finalize` to remove the bootstrapped private key:
+# Used by the --finalize option to remove the bootstrapped private key:
 GRAB_IDENTITY=${GRAB_IDENTITY}
 
 GRACE_SECONDS=5
@@ -369,6 +369,33 @@ else
     log "  systemctl enable --now ${SCRIPT_NAME}.timer"
 fi
 
+# Shows where the installed pieces live and how to look at them. This is what
+# people actually need right after an install.
+print_paths_and_checks() {
+    cat <<EOF
+
+ Where things live
+ -----------------
+   ${BIN}
+       the script itself - run "${SCRIPT_NAME}.sh --help" for all options
+   ${CONF}
+       configuration (mode 600)
+   /etc/systemd/system/${SCRIPT_NAME}.timer
+       runs one encryption pass every 10 seconds
+
+ Check on it
+ -----------
+   journalctl -u ${SCRIPT_NAME}.service -n 30    recent runs
+   ${SCRIPT_NAME}.sh --dry-run                   show what would be encrypted
+   ${SCRIPT_NAME}.sh --check-schema              after every Coolify upgrade
+   systemctl --failed                            did anything break?
+   systemctl list-timers ${SCRIPT_NAME}.timer
+
+ Documentation: https://github.com/${REPO_SLUG}
+
+EOF
+}
+
 print_final_warning() {
     local host
     host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo YOUR-SERVER)"
@@ -377,57 +404,64 @@ print_final_warning() {
         cat <<EOF
 
 ==============================================================================
- Installed with your own public key - there is no private key on this host.
+ INSTALLED - nothing left to do.
+
+ You supplied your own public key, so there is no private key on this host.
+ Encrypting happens automatically from now on.
+
  Decrypt on the machine that holds your key:
    tail -c +13 <backup-file> | age --decrypt --identity <your-copy> > restore.dmp
-==============================================================================
 
+ Public recipient in use: ${RECIPIENT}
+==============================================================================
 EOF
+        print_paths_and_checks
         return 0
     fi
 
     cat <<EOF
 
-##############################################################################
-#
-#   DEIN PRIVATER SCHLUESSEL LIEGT HIER:
-#
-#       ${GRAB_IDENTITY}
-#
-#   Solange diese Datei existiert, KANN DIESER SERVER ENTSSCHLUESSELN.
-#   Das ist nur fuer das Setup gedacht. MACH JETZT FOLGENDES:
-#
-#   1. Kopiere den Key auf DEINE Maschine (auf den Server gehoert er nicht):
-#
-#        scp root@${host}:${GRAB_IDENTITY} ./backup-identity.txt
-#
-#   2. Pruefe LOKAL, dass die Datei den Private Key enthaelt:
-#
-#        grep -q 'AGE-SECRET-KEY-1' ./backup-identity.txt && echo OK
-#
-#   3. Speichere sie in Vaultwarden UND auf einem Offline-Medium.
-#
-#   4. Teste die Kopie mit einer ECHTEN Backup-Datei (auf deiner Maschine):
-#
-#        tail -c +13 <backup-file> | age --decrypt --identity ./backup-identity.txt > restore.dmp
-#        pg_restore --list restore.dmp
-#
-#   5. Erst wenn das nachweislich funktioniert, den Key vom Server loeschen:
-#
-#        ${SCRIPT_NAME}.sh --finalize
-#
-#   --finalize loescht den Private Key vom Server (mit Bestaetigungsabfrage).
-#   Ohne Private Key = KEINE WIEDERHERSTELLUNG.
-#   Sei dir sicher, dass du eine funktionierende Kopie hast.
-#
-##############################################################################
+==============================================================================
+ INSTALLED - but one thing is still open.
+==============================================================================
 
-  Public recipient auf dem Server: ${RECIPIENT}
+ Encrypting already works: the timer below runs every 10 seconds, so every
+ finished Coolify backup gets encrypted on its own from now on.
 
-  Geht der Private Key verloren, sind ALLE Backups unlesbar. Es gibt keinen
-  Recovery-Weg und keine Garantie.
+ What is NOT done: the private key still sits on this server at
 
+     ${GRAB_IDENTITY}
+
+ which means THIS HOST COULD DECRYPT YOUR BACKUPS. That is only meant to be
+ temporary. Five steps close it:
+
+   1. Copy the private key to YOUR machine, not the server:
+
+        scp root@${host}:${GRAB_IDENTITY} ./backup-identity.txt
+
+   2. Verify you actually got a private key:
+
+        grep -q 'AGE-SECRET-KEY-1' ./backup-identity.txt && echo OK
+
+   3. Store it in a password manager AND on an offline medium.
+
+   4. Prove the copy works, with a real backup file, on your machine:
+
+        tail -c +13 <backup-file> | age --decrypt --identity ./backup-identity.txt > restore.dmp
+        pg_restore --list restore.dmp
+
+   5. Only once step 4 works, delete the key from this server:
+
+        ${SCRIPT_NAME}.sh --finalize
+
+ Lose the private key and every backup becomes unreadable. There is no
+ recovery path and no warranty - so do not skip step 4.
+
+ Public recipient in use: ${RECIPIENT}
+==============================================================================
 EOF
+
+    print_paths_and_checks
 }
 
 print_final_warning

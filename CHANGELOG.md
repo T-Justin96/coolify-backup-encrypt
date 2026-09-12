@@ -2,6 +2,15 @@
 
 Not a formal standard, just a short history.
 
+## 1.1.1 - 2026-09
+
+- Fixed: `install.sh` wrote a comment containing backticks into the generated
+  config. Inside an unquoted heredoc those ran as command substitution, which
+  printed a confusing `--finalize: command not found` in the middle of the
+  install output.
+- The post-install summary is now English, shorter and says where the files
+  ended up and how to look at them.
+
 ## 1.1.0 - 2026-09
 
 - `install.sh` works standalone now: `curl ... | sudo bash`. It downloads the

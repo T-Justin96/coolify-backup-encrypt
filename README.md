@@ -150,6 +150,33 @@ Installer flags:
 | `--ref <git ref>` | download this branch/tag/commit instead of `main` (same as `CBX_REF=...`) |
 | `--help` | usage |
 
+### After the install: where it went and how to use it
+
+There is nothing to run day to day. The systemd timer does one encryption pass
+every 10 seconds, forever.
+
+| Path | What it is |
+| --- | --- |
+| `/usr/local/bin/coolify-backup-encrypt.sh` | the script itself; `--help` lists every option |
+| `/etc/coolify-backup-encrypt.conf` | configuration, mode 600 |
+| `/etc/systemd/system/coolify-backup-encrypt.timer` | the schedule |
+| `/etc/systemd/system/coolify-backup-encrypt.service` | the unit the timer starts |
+| `/root/GRAB-ME-BEFORE-DELETE-identity.txt` | temporary private key; remove it with `--finalize` |
+
+Useful commands:
+
+```bash
+coolify-backup-encrypt.sh --dry-run        # what would be encrypted right now
+coolify-backup-encrypt.sh --check-schema   # after every Coolify upgrade
+coolify-backup-encrypt.sh --help           # all options
+journalctl -u coolify-backup-encrypt.service -n 30
+systemctl list-timers coolify-backup-encrypt.timer
+systemctl --failed
+```
+
+After an install, files that already exist get encrypted by the first few timer
+runs, and everything Coolify writes afterwards is encrypted within seconds.
+
 ### From a clone
 
 ```bash
