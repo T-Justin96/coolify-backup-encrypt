@@ -97,7 +97,7 @@ curl -fsSL <url> | sudo bash -s -- --recipient age1...
 
 # pin a release instead of following main
 curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh \
-  | sudo bash -s -- --ref v1.2.1
+  | sudo bash -s -- --ref v1.2.2
 ```
 
 > Piping a script into a root shell means trusting it blindly. If that bothers
@@ -106,11 +106,11 @@ curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/m
 > ```bash
 > curl -fsSLO https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh
 > less install.sh
-> sudo bash install.sh --ref v1.2.1
+> sudo bash install.sh --ref v1.2.2
 > ```
 
 > `raw.githubusercontent.com` can serve a cached copy for a few minutes after a
-> push. To get exactly the released version, pin it with `--ref v1.2.1`.
+> push. To get exactly the released version, pin it with `--ref v1.2.2`.
 
 ### From a clone
 
@@ -241,6 +241,8 @@ backups     8 referenced -> 2 encrypted, 0 pending, 6 not on this host
 | `--verify FILE [--identity K]` | header, format, size — and with a key, a real decrypt |
 | `--decrypt FILE` | decrypt to stdout |
 | `--decrypt-to OUT ENC` | decrypt into `OUT` (mode 0600, atomic); refuses to overwrite without `--force` |
+| `--ask-key` | always ask for the private key on the terminal; pasted keys never touch the disk |
+| `--no-prompt` | never ask; fail with instructions instead (scripts cannot hang) |
 | `--update [--ref REF]` | newest script + units. **Never touches config or keys** |
 | `--uninstall [--purge]` | stop and remove everything; backup files are kept |
 | `--cleanup-tmp` | remove `*.tmp.*` leftovers of crashed runs |
@@ -263,7 +265,7 @@ check failed. That is what makes `OnFailure=` alert you.
 
 ```bash
 sudo coolify-backup-encrypt.sh --update               # follow main
-sudo coolify-backup-encrypt.sh --update --ref v1.2.1  # pin a release
+sudo coolify-backup-encrypt.sh --update --ref v1.2.2  # pin a release
 ```
 
 It downloads the script and the units, checks that the script is valid bash,
@@ -350,15 +352,33 @@ journal does not fill up.
 links hand you the **encrypted** file. Coolify cannot decrypt it, so restoring is
 a manual two-step job.
 
-### 1. Decrypt, on the machine that holds the private key
+### 1. Decrypt
+
+The private key does not have to exist as a file. Get the script onto the machine
+that holds the key (any Linux box will do) and run:
 
 ```bash
 scp root@your-coolify:/data/coolify/backups/.../backup.dmp .
 
-# with the script present
 coolify-backup-encrypt.sh --decrypt-to restore.dmp backup.dmp
+# it asks: paste the private key (the AGE-SECRET-KEY-1... line), then Enter
+```
 
-# or by hand - the magic header is the first 12 bytes
+`--ask-key` forces the prompt even if a key file happens to be present.
+
+What the prompt does and does not do:
+
+- reads from the terminal, so nothing is echoed and **nothing lands in your shell
+  history**
+- keeps the key in memory only — age receives it through a `/dev/fd`, not a file
+- rejects anything that is not a private key, so pasting the public `age1...`
+  key by mistake fails right away instead of producing garbage
+- if you paste the whole identity file, the leftover lines are thrown away
+  instead of being run as shell commands afterwards
+
+By hand, with the header stripped:
+
+```bash
 tail -c +13 backup.dmp | age --decrypt --identity ./backup-identity.txt > restore.dmp
 ```
 
@@ -474,6 +494,8 @@ systemctl daemon-reload && systemctl restart coolify-backup-encrypt.timer
 | `--status` says `key on host YES` | The bootstrap key is still there. Copy it away, verify it, then run `--finalize`. |
 | The installer stopped halfway, or says `refusing to guess` | Read the message: it names the exact command to continue. `--keep-key` keeps the recipient your backups are already encrypted to (almost always what you want), `--new-key` starts over and makes old backups unreadable. Earlier versions could leave the script replaced but the systemd units stale; `--update` now repairs that (it compares files, not just version numbers). |
 | `bash: --recipient: invalid option` | You piped into bash without `-s --`. It must be `curl ... \| sudo bash -s -- --recipient age1...`, otherwise bash itself swallows the flag. |
+| `--decrypt` asks for a key / `no usable private key` | Paste the `AGE-SECRET-KEY-1...` line, or pass `--identity FILE`, or run it where the key file lives. In a script, add `--no-prompt` so it fails instead of waiting. |
+| Pasted a key but it says "does not look like an age private key" | You pasted the public key (`age1...`) or a comment line. It needs the line starting with `AGE-SECRET-KEY-1`. |
 | `systemctl --failed` lists the unit | You got an alert. Look at `journalctl -u coolify-backup-encrypt.service -n 50`. |
 
 ## Self-test

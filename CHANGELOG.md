@@ -2,6 +2,28 @@
 
 Not a formal standard, just a short history.
 
+## 1.2.2 - 2026-09
+
+- `--decrypt`, `--decrypt-to` and `--verify` now ask for the private key when
+  there is none readable, instead of only failing. Especially useful when the key
+  must not exist as a file: `--ask-key` forces the prompt.
+  - The prompt reads from `/dev/tty` (`read -rs`): no echo, and nothing in the
+    shell history. The key is handed to age through a `/dev/fd`, so it never
+    touches the disk.
+  - Anything that is not an age private key is rejected up front, including
+    accidentally pasting the public `age1...` key.
+  - If a whole identity file is pasted, the leftover lines are drained so they
+    cannot be executed as shell commands afterwards.
+- New `--no-prompt`: never ask, fail with instructions instead, so a script that
+  calls this cannot hang.
+- Fixed: `--decrypt-to` consumed only two of its three arguments. The leftover
+  filename was parsed as another option. The old `exit 0` had been hiding it.
+- Actions are now dispatched after all options are parsed, so flags may come in
+  any order (`--decrypt-to out enc --identity key` works now).
+- Self-test: the interactive prompt is now covered for real, driven through a
+  pseudo terminal (`script(1)`), including the rejection paths. Skipped where
+  `script` is unavailable.
+
 ## 1.2.1 - 2026-09
 
 Fixes for the second half of a real install: a refusal message whose commands

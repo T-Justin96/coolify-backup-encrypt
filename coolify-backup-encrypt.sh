@@ -58,6 +58,7 @@
 #   coolify-backup-encrypt.sh --verify FILE            # sanity-check an encrypted file
 #   coolify-backup-encrypt.sh --decrypt FILE           # decrypt FILE to stdout
 #   coolify-backup-encrypt.sh --decrypt-to OUT ENC     # decrypt ENC into OUT
+#   coolify-backup-encrypt.sh --ask-key ...            # paste the key, never from disk
 #   coolify-backup-encrypt.sh --cleanup-tmp            # remove orphaned *.tmp.*
 #   coolify-backup-encrypt.sh --finalize               # delete the bootstrapped key
 #   coolify-backup-encrypt.sh --update [--ref REF]     # upgrade script + systemd units
@@ -69,7 +70,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 
 # Where this script and its units live. Overridable so the self-test can point
 # them at a scratch directory.
@@ -108,7 +109,12 @@ DRY_RUN=0
 FORCE=0
 PURGE=0
 IDENTITY=""
+ASK_KEY=0
+NO_PROMPT=0
 MODE="run"
+DECRYPT_INPUT=""
+DECRYPT_OUT=""
+VERIFY_FILE=""
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -141,7 +147,15 @@ Usage: coolify-backup-encrypt.sh [options]
                             Refuses to overwrite OUT unless --force is given.
   --identity FILE           Private key to use for --verify/--decrypt, instead
                             of AGE_IDENTITY.
+  --ask-key                 Always ask for the private key on the terminal, even
+                            if a key file exists. Pasted keys are never written
+                            to disk and never end up in your shell history.
+  --no-prompt               Never ask. Fail with instructions instead, so a
+                            script cannot hang waiting for input.
   -f, --force               Allow --decrypt-to to overwrite an existing file.
+
+  Without a readable key, --decrypt, --decrypt-to and --verify ask you to paste
+  the private key, unless there is no terminal (or --no-prompt is set).
   --cleanup-tmp             Remove orphaned '*.tmp.*' files (crashed runs).
   --finalize                Delete the temporary private key that install.sh
                             left on this host. Asks for confirmation.
@@ -281,9 +295,112 @@ encrypt_file() {
 # -----------------------------------------------------------------------------
 # Decryption (manual use, e.g. before a restore)
 # -----------------------------------------------------------------------------
-decrypt_stream() {
-    [ -r "$AGE_IDENTITY" ] || die "AGE_IDENTITY '${AGE_IDENTITY}' is not readable"
-    age --decrypt --identity "$AGE_IDENTITY"
+# Where the private key comes from, in this order: --ask-key, --identity,
+# AGE_IDENTITY, then asking on the terminal. Nothing is ever written to disk.
+PROMPTED_KEY=""
+IDENTITY_PATH=""
+
+can_prompt() {
+    if [ "$NO_PROMPT" -eq 1 ]; then
+        return 1
+    fi
+    { : < /dev/tty; } 2>/dev/null
+}
+
+# If a whole identity file was pasted, the leftover lines are still sitting in
+# the terminal input buffer and would be run as commands at the next shell
+# prompt. Throw them away.
+drain_tty() {
+    local junk=""
+    while IFS= read -r -t 0.05 junk < /dev/tty 2>/dev/null; do
+        :
+    done
+    return 0
+}
+
+# Reads the key from the terminal. `read -rs` echoes nothing and, unlike typing
+# it onto the command line, leaves no trace in the shell history.
+prompt_for_key() {
+    local key=""
+
+    printf 'paste the private key (the AGE-SECRET-KEY-1... line), then Enter: ' >&2
+    read -rs key < /dev/tty || true
+    printf '\n' >&2
+    drain_tty
+
+    if ! printf '%s' "$key" | grep -q 'AGE-SECRET-KEY-1'; then
+        die "that does not look like an age private key. Paste the line starting with AGE-SECRET-KEY-1 (a public key 'age1...' will not work)."
+    fi
+
+    PROMPTED_KEY="$key"
+    key=""
+}
+
+identity_label() {
+    if [ -n "$PROMPTED_KEY" ]; then
+        printf 'the key you pasted'
+    else
+        printf '%s' "$IDENTITY_PATH"
+    fi
+}
+
+identity_available() {
+    [ -n "$PROMPTED_KEY" ] || { [ -n "$IDENTITY_PATH" ] && [ -r "$IDENTITY_PATH" ]; }
+}
+
+# Decides where the key comes from. $1 = required dies when there is none,
+# optional just leaves both variables empty (--verify can still check the file).
+resolve_identity() { # $1 = required | optional
+    local mode="${1:-required}" configured
+
+    if [ -n "$IDENTITY" ]; then
+        configured="$IDENTITY"
+    else
+        configured="$AGE_IDENTITY"
+    fi
+
+    if [ "$ASK_KEY" -eq 1 ]; then
+        if can_prompt; then
+            prompt_for_key
+            return 0
+        fi
+        die "--ask-key needs a terminal to read from. Use --identity FILE instead."
+    fi
+
+    if [ -n "$IDENTITY" ]; then
+        [ -r "$IDENTITY" ] || die "--identity '${IDENTITY}' is not readable"
+        IDENTITY_PATH="$IDENTITY"
+        return 0
+    fi
+
+    if [ -r "$AGE_IDENTITY" ]; then
+        IDENTITY_PATH="$AGE_IDENTITY"
+        return 0
+    fi
+
+    if can_prompt; then
+        prompt_for_key
+        return 0
+    fi
+
+    if [ "$mode" = "optional" ]; then
+        return 0
+    fi
+
+    die "no usable private key: '${configured}' is not readable, and there is no terminal to ask on.
+    Use --identity FILE, or --ask-key on a terminal. The key never has to exist
+    as a file on this host."
+}
+
+# Decrypts the payload of an encrypted file to stdout, with whatever key we got.
+decrypt_payload_of() { # $1 = file
+    if [ -n "$PROMPTED_KEY" ]; then
+        # Process substitution: age gets a file-like /dev/fd, so the key stays in
+        # memory and is never written to disk.
+        tail -c "+$(( ${#MAGIC} + 2 ))" "$1" | age --decrypt --identity <(printf '%s\n' "$PROMPTED_KEY")
+    else
+        tail -c "+$(( ${#MAGIC} + 2 ))" "$1" | age --decrypt --identity "$IDENTITY_PATH"
+    fi
 }
 
 do_decrypt() {
@@ -292,8 +409,7 @@ do_decrypt() {
     if ! is_encrypted "$file"; then
         die "not encrypted with this script (missing ${MAGIC} header): ${file}"
     fi
-    # Skip the magic header and the newline that follows it.
-    tail -c "+$(( ${#MAGIC} + 2 ))" "$file" | decrypt_stream
+    decrypt_payload_of "$file"
 }
 
 # Decrypts an encrypted backup into a new file (mode 0600, atomic rename).
@@ -308,7 +424,7 @@ do_decrypt_to() {
     fi
 
     tmp="${out}.tmp.$$"
-    if ! tail -c "+$(( ${#MAGIC} + 2 ))" "$file" | decrypt_stream > "$tmp"; then
+    if ! decrypt_payload_of "$file" > "$tmp"; then
         rm -f -- "$tmp"
         die "decryption failed for ${file} (wrong key, truncated or corrupt file?)"
     fi
@@ -541,7 +657,7 @@ do_status() {
 # --verify: sanity check an encrypted backup, no pg_restore required
 # -----------------------------------------------------------------------------
 do_verify() {
-    local file="$1" size hex identity
+    local file="$1" size hex
 
     [ -f "$file" ] || die "file not found: ${file}"
     [ -s "$file" ] || die "file is empty: ${file}"
@@ -564,20 +680,18 @@ do_verify() {
         *)         printf 'payload     unrecognised, first bytes: %s\n' "$hex" ;;
     esac
 
-    identity="${IDENTITY:-$AGE_IDENTITY}"
-    if [ -r "$identity" ]; then
-        if tail -c "+$(( ${#MAGIC} + 2 ))" "$file" | age --decrypt --identity "$identity" >/dev/null 2>&1; then
-            printf 'decrypt     OK with %s\n' "$identity"
+    if identity_available; then
+        if decrypt_payload_of "$file" >/dev/null 2>&1; then
+            printf 'decrypt     OK with %s\n' "$(identity_label)"
             printf '\nVERIFY OK - this file really decrypts with that key.\n'
             return 0
         fi
-        die "decryption FAILED with ${identity} - wrong key, or the file is damaged"
+        die "decryption FAILED with $(identity_label) - wrong key, or the file is damaged"
     fi
 
-    printf 'decrypt     skipped, no readable private key at %s\n' "$identity"
+    printf 'decrypt     skipped, no private key available\n'
     printf '\nVERIFY OK - header and payload look right.\n'
-    printf 'Run the same command on the machine that holds your private key to prove\n'
-    printf 'that the content really decrypts.\n'
+    printf 'Run this where the private key is, or on a terminal so it can ask.\n'
     return 0
 }
 
@@ -956,11 +1070,17 @@ main() {
                 [ "$#" -gt 0 ] || die "usage: $0 --identity FILE"
                 IDENTITY="$1"
                 ;;
+            --ask-key)
+                ASK_KEY=1
+                ;;
+            --no-prompt)
+                NO_PROMPT=1
+                ;;
             --verify)
                 shift
                 [ "$#" -gt 0 ] || die "usage: $0 --verify FILE"
-                do_verify "$1"
-                exit 0
+                MODE="verify"
+                VERIFY_FILE="$1"
                 ;;
             -n|--dry-run)
                 DRY_RUN=1
@@ -971,14 +1091,16 @@ main() {
             -d|--decrypt)
                 shift
                 [ "$#" -gt 0 ] || die "usage: $0 --decrypt FILE"
-                do_decrypt "$1"
-                exit 0
+                MODE="decrypt"
+                DECRYPT_INPUT="$1"
                 ;;
             --decrypt-to)
                 shift
                 [ "$#" -ge 2 ] || die "usage: $0 --decrypt-to OUTPUT ENCRYPTED_FILE"
-                do_decrypt_to "$1" "$2"
-                exit 0
+                MODE="decryptto"
+                DECRYPT_OUT="$1"
+                DECRYPT_INPUT="$2"
+                shift
                 ;;
             --recipient|--keep-key|--new-key|--no-enable)
                 die "'$1' is an install.sh option, not a coolify-backup-encrypt.sh option.
@@ -999,6 +1121,18 @@ main() {
         status) do_status ;;
         update) do_update ;;
         uninstall) do_uninstall ;;
+        decrypt)
+            resolve_identity required
+            do_decrypt "$DECRYPT_INPUT"
+            ;;
+        decryptto)
+            resolve_identity required
+            do_decrypt_to "$DECRYPT_OUT" "$DECRYPT_INPUT"
+            ;;
+        verify)
+            resolve_identity optional
+            do_verify "$VERIFY_FILE"
+            ;;
         *) run_pass ;;
     esac
 }

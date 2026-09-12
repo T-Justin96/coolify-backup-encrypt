@@ -393,7 +393,7 @@ run_verify_case() {
 
     { printf '%s\n' "$MAGIC"; printf 'PGDMP\000\001\002\003payload'; } > "$w/pg.dmp"
 
-    bash "$SCRIPT" --verify "$w/pg.dmp" > "$w/ok.log" 2>&1
+    bash "$SCRIPT" --no-prompt --verify "$w/pg.dmp" > "$w/ok.log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
         fail "--verify rejected a file with a valid header (exit ${rc}): $(cat "$w/ok.log")"
@@ -407,13 +407,13 @@ run_verify_case() {
     fi
 
     printf 'not encrypted\n' > "$w/plain.dmp"
-    if bash "$SCRIPT" --verify "$w/plain.dmp" >/dev/null 2>&1; then
+    if bash "$SCRIPT" --no-prompt --verify "$w/plain.dmp" >/dev/null 2>&1; then
         fail "--verify accepted a file without the magic header"
         rm -rf "$w"
         return 1
     fi
 
-    if bash "$SCRIPT" --verify "$w/does-not-exist" >/dev/null 2>&1; then
+    if bash "$SCRIPT" --no-prompt --verify "$w/does-not-exist" >/dev/null 2>&1; then
         fail "--verify accepted a file that does not exist"
         rm -rf "$w"
         return 1
@@ -426,14 +426,14 @@ run_verify_case() {
         printf 'PGDMP\000\001\002\003real payload\n' > "$w/body.dmp"
         { printf '%s\n' "$MAGIC"; age --encrypt --recipient "$recipient" < "$w/body.dmp"; } > "$w/real.enc"
 
-        bash "$SCRIPT" --verify "$w/real.enc" --identity "$w/agekey.txt" > "$w/real.log" 2>&1
+        bash "$SCRIPT" --no-prompt --verify "$w/real.enc" --identity "$w/agekey.txt" > "$w/real.log" 2>&1
         if [ $? -ne 0 ]; then
             fail "--verify failed on a file encrypted with the matching key: $(cat "$w/real.log")"
             rm -rf "$w"
             return 1
         fi
 
-        if bash "$SCRIPT" --verify "$w/real.enc" --identity "$w/pg.dmp" >/dev/null 2>&1; then
+        if bash "$SCRIPT" --no-prompt --verify "$w/real.enc" --identity "$w/pg.dmp" >/dev/null 2>&1; then
             fail "--verify claimed success with a wrong identity"
             rm -rf "$w"
             return 1
@@ -715,6 +715,138 @@ run_installer_case() {
     return 0
 }
 
+# Without a usable key it must fail with instructions - never hang waiting for
+# input, and --verify must still be able to check the container.
+run_key_prompt_case() {
+    local w out rc
+
+    w="$(mktemp -d)"
+    prepare_work "$w"
+    configure_crypt "$w"
+    echo "== case: no key available (no terminal) =="
+
+    # Override the identity configure_crypt set, so nothing is readable.
+    echo "AGE_IDENTITY=${w}/no-such-identity.txt" >> "$w/conf"
+
+    PATH="$w/bin:$PATH"
+    FAKE_FILENAMES="$w/filenames"
+    CONF_FILE="$w/conf"
+    export PATH FAKE_FILENAMES CONF_FILE
+
+    # Encrypt something first, so we have a real file to work with.
+    if ! bash "$SCRIPT" >/dev/null 2>&1; then
+        fail "could not prepare an encrypted file"
+        rm -rf "$w"
+        return 1
+    fi
+
+    out="$(bash "$SCRIPT" --no-prompt --decrypt "$w/dump.dmp" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "--decrypt succeeded although no key was available"
+        rm -rf "$w"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q -- '--identity'; then
+        fail "--decrypt's error does not tell you about --identity: ${out}"
+        rm -rf "$w"
+        return 1
+    fi
+
+    out="$(bash "$SCRIPT" --no-prompt --ask-key --decrypt "$w/dump.dmp" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "--ask-key --no-prompt did not fail"
+        rm -rf "$w"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q 'needs a terminal'; then
+        fail "--ask-key's error does not explain the terminal requirement: ${out}"
+        rm -rf "$w"
+        return 1
+    fi
+
+    out="$(bash "$SCRIPT" --no-prompt --verify "$w/dump.dmp" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "--verify should still work without a key: ${out}"
+        rm -rf "$w"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q 'skipped, no private key'; then
+        fail "--verify did not report that it skipped the decryption: ${out}"
+        rm -rf "$w"
+        return 1
+    fi
+
+    echo "   PASS (fails with instructions instead of hanging, --verify still checks)"
+    rm -rf "$w"
+    return 0
+}
+
+# The interactive prompt, driven through a pseudo terminal so it can actually be
+# tested instead of just claimed. Skipped where script(1) is missing.
+run_prompt_case() {
+    local w key out
+
+    echo "== case: interactive key prompt (--ask-key) =="
+    if ! command -v script >/dev/null 2>&1; then
+        echo "   [skip] script(1) is not available here"
+        return 0
+    fi
+
+    w="$(mktemp -d)"
+    prepare_work "$w"
+    configure_crypt "$w"
+
+    PATH="$w/bin:$PATH"
+    FAKE_FILENAMES="$w/filenames"
+    CONF_FILE="$w/conf"
+    export PATH FAKE_FILENAMES CONF_FILE
+
+    # Nothing on disk to read the key from, so it has to ask.
+    echo "AGE_IDENTITY=${w}/no-such-identity.txt" >> "$w/conf"
+
+    if ! bash "$SCRIPT" >/dev/null 2>&1; then
+        fail "could not prepare an encrypted file"
+        rm -rf "$w"
+        return 1
+    fi
+
+    key="$(grep 'AGE-SECRET-KEY-1' "$w/agekey.txt" | head -n1)"
+    if [ -z "$key" ]; then
+        fail "could not read the test key"
+        rm -rf "$w"
+        return 1
+    fi
+
+    # Pasting the right key must decrypt.
+    out="$(printf '%s\n' "$key" | script -qec "bash '$SCRIPT' --ask-key --decrypt '$w/dump.dmp'" /dev/null 2>&1)"
+    if ! printf '%s' "$out" | grep -q 'fake dump line 42'; then
+        fail "--ask-key did not decrypt with a pasted key"
+        rm -rf "$w"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q 'paste the private key'; then
+        fail "the prompt text was not shown"
+        rm -rf "$w"
+        return 1
+    fi
+
+    # A public key must be rejected before anything is attempted.
+    out="$(printf 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n' \
+        | script -qec "bash '$SCRIPT' --ask-key --decrypt '$w/dump.dmp'" /dev/null 2>&1)"
+    if ! printf '%s' "$out" | grep -q 'does not look like an age private key'; then
+        fail "a pasted public key was not rejected"
+        rm -rf "$w"
+        return 1
+    fi
+
+    echo "   PASS (prompt shown, pasted key decrypts, public key rejected)"
+    rm -rf "$w"
+    return 0
+}
+
 run_cli_case() {
     echo "== case: --help / --version =="
 
@@ -800,6 +932,8 @@ run_failure_exit_case
 run_missing_dedupe_case
 run_update_case
 run_installer_case
+run_key_prompt_case
+run_prompt_case
 
 if [ "$FAILED" -eq 0 ]; then
     echo "ALL TESTS PASSED"

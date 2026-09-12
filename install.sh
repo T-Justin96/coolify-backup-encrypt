@@ -37,7 +37,7 @@
 #   ./install.sh --no-prompt           # never ask; fail instead (for scripts)
 #   ./install.sh --no-enable           # install only, do not start the timer
 #   ./install.sh --force               # overwrite an existing config
-#   ./install.sh --ref v1.2.1          # pull this git ref instead of main
+#   ./install.sh --ref v1.2.2          # pull this git ref instead of main
 #   ./install.sh --help
 #
 # Every option also works through the pipe:
@@ -113,7 +113,7 @@ Usage:
   ./install.sh --no-prompt           never ask; fail instead (for scripts)
   ./install.sh --no-enable           install only, do not start the timer
   ./install.sh --force               overwrite an existing config
-  ./install.sh --ref v1.2.1          pull this git ref instead of main
+  ./install.sh --ref v1.2.2          pull this git ref instead of main
   ./install.sh --help
 
 Standalone (no checkout needed):
