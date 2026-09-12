@@ -15,12 +15,15 @@
 #   1. root / docker / Coolify checks
 #   2. fetches the remaining files (only when run standalone)
 #   3. installs dependencies (age, util-linux, coreutils)
-#   4. installs the main script to /usr/local/bin/
-#   5. creates /etc/coolify-backup-encrypt/
-#   6. generates an age key pair, private key -> /root/GRAB-ME-BEFORE-DELETE-identity.txt
-#   7. writes /etc/coolify-backup-encrypt.conf (age, public key only)
-#   8. installs and enables the systemd service + timer
-#   9. prints a big warning telling you to copy the key away and then finalize
+#   4. decides which key to use. If that is ambiguous it asks you, with a safe
+#      default, BEFORE anything is written. It never silently replaces a key
+#      that existing backups were encrypted with.
+#   5. creates and verifies the key pair (only if step 4 decided to)
+#   6. installs the main script to /usr/local/bin/
+#   7. creates /etc/coolify-backup-encrypt/
+#   8. writes /etc/coolify-backup-encrypt.conf (age, public key only)
+#   9. installs and enables the systemd service + timer
+#  10. prints where everything is and what to do next
 #
 # !! The private key exists on this host until you run:
 #        coolify-backup-encrypt.sh --finalize
@@ -29,19 +32,25 @@
 # Usage:
 #   ./install.sh                       # generate a new key pair on this host
 #   ./install.sh --recipient age1...   # use your own public key, no keypair generated
+#   ./install.sh --keep-key            # keep the recipient already in the config
+#   ./install.sh --new-key             # deliberately start over with a new key pair
+#   ./install.sh --no-prompt           # never ask; fail instead (for scripts)
 #   ./install.sh --no-enable           # install only, do not start the timer
-#   ./install.sh --force               # rewrite an existing config
-#   ./install.sh --ref v1.0.0          # pull this git ref instead of main
+#   ./install.sh --force               # overwrite an existing config
+#   ./install.sh --ref v1.2.1          # pull this git ref instead of main
 #   ./install.sh --help
 #
 # Every option also works through the pipe:
-#   curl -fsSL <url> | sudo bash -s -- --no-enable --ref v1.0.0
+#   curl -fsSL <url> | sudo bash -s -- --keep-key
+#
+# If the key situation is ambiguous and there is a terminal, the installer asks
+# instead of guessing. Without a terminal it refuses and prints what to pass.
 #
 set -Eeuo pipefail
 
 SCRIPT_NAME="coolify-backup-encrypt"
 REPO_SLUG="T-Justin96/coolify-backup-encrypt"
-REPO_RAW_URL="https://raw.githubusercontent.com/${REPO_SLUG}"
+REPO_RAW_URL="${REPO_RAW_URL:-https://raw.githubusercontent.com/${REPO_SLUG}}"
 CBX_REF="${CBX_REF:-main}"
 
 # Where do our own files live? When this script is piped into bash there is no
@@ -53,19 +62,31 @@ else
     SRC_DIR=""
 fi
 
-BIN="/usr/local/bin/${SCRIPT_NAME}.sh"
-CONF_DIR="/etc/${SCRIPT_NAME}"
-CONF="/etc/${SCRIPT_NAME}.conf"
-GRAB_IDENTITY="/root/GRAB-ME-BEFORE-DELETE-identity.txt"
-SYSTEMD_DIR="/etc/systemd/system"
-DB_CONTAINER="coolify-db"
-BACKUP_ROOT="/data/coolify/backups"
-COOLIFY_ENV_FILE="/data/coolify/source/.env"
+# Overridable so the self-test can point them at a scratch directory.
+BIN="${BIN:-/usr/local/bin/${SCRIPT_NAME}.sh}"
+CONF_DIR="${CONF_DIR:-/etc/${SCRIPT_NAME}}"
+CONF="${CONF:-/etc/${SCRIPT_NAME}.conf}"
+GRAB_IDENTITY="${GRAB_IDENTITY:-/root/GRAB-ME-BEFORE-DELETE-identity.txt}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+DB_CONTAINER="${DB_CONTAINER:-coolify-db}"
+BACKUP_ROOT="${BACKUP_ROOT:-/data/coolify/backups}"
+COOLIFY_ENV_FILE="${COOLIFY_ENV_FILE:-/data/coolify/source/.env}"
 
 RECIPIENT=""
 FORCE=0
 DO_ENABLE=1
 GENERATED_KEYS=0
+KEEP_KEY=0
+NEW_KEY=0
+NO_PROMPT=0
+
+# A ready-to-paste way to run this installer again, whichever way it was started.
+# Using $0 here would print "bash" when the script came from a pipe.
+if [ -n "$SRC_DIR" ] && [ -r "${SRC_DIR}/install.sh" ]; then
+    SELF_CMD="sudo bash $(printf '%q' "${SRC_DIR}/install.sh")"
+else
+    SELF_CMD="curl -fsSL ${REPO_RAW_URL}/${CBX_REF}/install.sh | sudo bash -s --"
+fi
 
 log() {
     printf '[install] %s\n' "$*"
@@ -87,16 +108,22 @@ Install coolify-backup-encrypt (age, public key only) on a Coolify host.
 Usage:
   ./install.sh                       generate a new key pair on this host
   ./install.sh --recipient age1...   use your own public key, no keypair generated
+  ./install.sh --keep-key            keep the recipient already in the config
+  ./install.sh --new-key             deliberately start over with a new key pair
+  ./install.sh --no-prompt           never ask; fail instead (for scripts)
   ./install.sh --no-enable           install only, do not start the timer
-  ./install.sh --force               rewrite an existing config
-  ./install.sh --ref v1.0.0          pull this git ref instead of main
+  ./install.sh --force               overwrite an existing config
+  ./install.sh --ref v1.2.1          pull this git ref instead of main
   ./install.sh --help
 
 Standalone (no checkout needed):
   curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh | sudo bash
 
-  Every option also works through the pipe:
-  curl -fsSL <url> | sudo bash -s -- --no-enable --ref v1.0.0
+  Every option also works through the pipe - note the "-s --":
+  curl -fsSL <url> | sudo bash -s -- --keep-key
+
+If the key situation is ambiguous the installer asks, with a safe default, and
+without a terminal it refuses instead of guessing.
 
 Standalone mode downloads coolify-backup-encrypt.sh and the systemd units from
 the repository. Read the downstream script before piping anything into root.
@@ -113,6 +140,15 @@ while [ "$#" -gt 0 ]; do
             shift
             [ "$#" -gt 0 ] || die "--recipient needs an age1... value"
             RECIPIENT="$1"
+            ;;
+        --keep-key)
+            KEEP_KEY=1
+            ;;
+        --new-key)
+            NEW_KEY=1
+            ;;
+        --no-prompt)
+            NO_PROMPT=1
             ;;
         --force)
             FORCE=1
@@ -132,12 +168,19 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$KEEP_KEY" -eq 1 ] && [ "$NEW_KEY" -eq 1 ]; then
+    die "--keep-key and --new-key contradict each other"
+fi
+if [ -n "$RECIPIENT" ] && { [ "$KEEP_KEY" -eq 1 ] || [ "$NEW_KEY" -eq 1 ]; }; then
+    die "--recipient cannot be combined with --keep-key or --new-key"
+fi
+
 # -----------------------------------------------------------------------------
 # 1. Checks
 # -----------------------------------------------------------------------------
 log "Checking prerequisites"
 
-[ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0)"
+[ "$(id -u)" -eq 0 ] || die "must run as root. Try: ${SELF_CMD}"
 
 case "$(uname -s)" in
     Linux) : ;;
@@ -266,69 +309,218 @@ command -v age-keygen >/dev/null 2>&1 || die "age-keygen is still missing after 
 command -v flock >/dev/null 2>&1 || warn "flock is missing - concurrent runs cannot be prevented"
 
 # -----------------------------------------------------------------------------
-# 4. Main script
+# 4. Decide which key to use
 # -----------------------------------------------------------------------------
-log "Installing ${BIN}"
-install -m 0755 "${SRC_DIR}/${SCRIPT_NAME}.sh" "$BIN"
+# Nothing is written to disk before this is settled, so an abort - including a
+# "no" at the prompt - leaves the host exactly as it was.
 
-# -----------------------------------------------------------------------------
-# 5. Directories
-# -----------------------------------------------------------------------------
-install -d -m 0700 "$CONF_DIR"
+# Reading from stdin would eat the installer itself when it arrived through a
+# pipe (`curl ... | sudo bash`), so prompts must use the controlling terminal.
+can_prompt() {
+    if [ "$NO_PROMPT" -eq 1 ]; then
+        return 1
+    fi
+    { : < /dev/tty; } 2>/dev/null
+}
 
-# -----------------------------------------------------------------------------
-# 6. age key pair
-# -----------------------------------------------------------------------------
-# An existing config already pins the key that backups are encrypted to. Minting
-# a fresh key pair here would hand you a key that does NOT match it: old backups
-# stay unreadable and the new "backup" of the key is worthless.
+ask_choice() { # $1 = question, $2 = default answer
+    local answer=""
+    printf '%s' "$1" > /dev/tty
+    read -r answer < /dev/tty || true
+    [ -n "$answer" ] || answer="$2"
+    printf '%s' "$answer"
+}
+
+# Updates only the AGE_RECIPIENT line, keeping every other change you made.
+set_config_recipient() {
+    local tmp="${CONF}.tmp.$$"
+    if grep -q '^AGE_RECIPIENT=' "$CONF" 2>/dev/null; then
+        sed "s|^AGE_RECIPIENT=.*|AGE_RECIPIENT=${RECIPIENT}|" "$CONF" > "$tmp" \
+            || die "cannot rewrite ${CONF}"
+    else
+        cat "$CONF" > "$tmp" || die "cannot read ${CONF}"
+        printf 'AGE_RECIPIENT=%s\n' "$RECIPIENT" >> "$tmp"
+    fi
+    chmod 600 "$tmp"
+    mv -f -- "$tmp" "$CONF"
+    log "Updated AGE_RECIPIENT in ${CONF} (everything else kept)."
+}
+
+choose_new_key() { # $1 = why
+    log "Starting over with a new key pair (${1})"
+    warn "Backups encrypted with the previous recipient can never be read again."
+    KEY_MODE="generate"
+    NEED_KEYGEN=1
+    VERIFY_KEYPAIR=1
+    UPDATE_CONFIG_RECIPIENT=1
+}
+
+die_ambiguous() { # $1 = recipient already configured
+    cat >&2 <<EOF
+
+[install] ERROR: refusing to guess - guessing here risks your backups.
+
+  ${CONF} already encrypts to:
+
+      ${1}
+
+  Pick one on the command line. Nothing has been changed yet.
+
+    keep that key, change nothing about encryption:
+
+        ${SELF_CMD} --keep-key
+
+    generate a new key pair and update the config
+    (backups encrypted with the key above become UNREADABLE):
+
+        ${SELF_CMD} --new-key
+
+    use a public key you keep somewhere else:
+
+        ${SELF_CMD} --recipient age1...
+
+EOF
+    exit 1
+}
+
+resolve_key() { # $1 = recipient in the config, $2 = recipient of the key on this host
+    local configured="$1" onhost="$2" answer=""
+
+    if [ -n "$RECIPIENT" ]; then
+        case "$RECIPIENT" in
+            age1*) : ;;
+            *) die "--recipient must be an age public key (age1...)" ;;
+        esac
+        log "Using the recipient you provided - no key pair generated on this host"
+        KEY_MODE="given"
+        return 0
+    fi
+
+    # A key that matches (or a host with no config yet): just use it.
+    if [ -n "$onhost" ] && { [ -z "$configured" ] || [ "$onhost" = "$configured" ]; }; then
+        RECIPIENT="$onhost"
+        KEY_MODE="reuse"
+        VERIFY_KEYPAIR=1
+        log "Reusing the private key already on this host"
+        return 0
+    fi
+
+    # Nothing configured, nothing on the host: a plain fresh install.
+    if [ -z "$configured" ]; then
+        choose_new_key "nothing configured yet"
+        return 0
+    fi
+
+    if [ "$KEEP_KEY" -eq 1 ]; then
+        RECIPIENT="$configured"
+        KEY_MODE="reuse"
+        log "Keeping the recipient already configured (--keep-key)"
+        if [ -n "$onhost" ]; then
+            warn "The private key at ${GRAB_IDENTITY} does not match it and is useless"
+            warn "for these backups. Delete it once you are sure you hold the right key."
+        fi
+        return 0
+    fi
+    if [ "$NEW_KEY" -eq 1 ]; then
+        choose_new_key "you asked for --new-key"
+        return 0
+    fi
+
+    if ! can_prompt; then
+        die_ambiguous "$configured"
+    fi
+
+    if [ -n "$onhost" ]; then
+        cat > /dev/tty <<EOF
+
+  Careful - two different keys are in play:
+
+      config says:          ${configured}
+      key on this host is:  ${onhost}
+
+  Backups encrypted with the config key can only be read with ITS private key.
+
+    a) keep the key from the config                          [default]
+       the private key on this host does not match it and is useless
+    b) use the key that is on this host and update the config
+       backups encrypted with the config key become UNREADABLE
+
+EOF
+        answer="$(ask_choice '  Choose [a/b] (enter = a): ' a)"
+        case "$answer" in
+            a|A)
+                RECIPIENT="$configured"
+                KEY_MODE="reuse"
+                log "Keeping the config recipient. The key on this host does not match it."
+                ;;
+            b|B)
+                RECIPIENT="$onhost"
+                KEY_MODE="reuse"
+                VERIFY_KEYPAIR=1
+                UPDATE_CONFIG_RECIPIENT=1
+                log "Using the key that is on this host and updating the config."
+                ;;
+            *)
+                die "not a valid choice - nothing was changed"
+                ;;
+        esac
+        return 0
+    fi
+
+    cat > /dev/tty <<EOF
+
+  ${CONF} already encrypts to:
+
+      ${configured}
+
+  There is no private key on this host. What should happen?
+
+    a) keep that key, change nothing about encryption         [default]
+    b) GENERATE A NEW KEY PAIR
+       every backup encrypted with the key above becomes UNREADABLE
+
+EOF
+    answer="$(ask_choice '  Choose [a/b] (enter = a): ' a)"
+    case "$answer" in
+        a|A)
+            RECIPIENT="$configured"
+            KEY_MODE="reuse"
+            log "Keeping the recipient already configured"
+            ;;
+        b|B)
+            choose_new_key "you chose b"
+            ;;
+        *)
+            die "not a valid choice - nothing was changed"
+            ;;
+    esac
+}
+
+KEY_MODE=""
+NEED_KEYGEN=0
+VERIFY_KEYPAIR=0
+UPDATE_CONFIG_RECIPIENT=0
+
 configured_recipient=""
 if [ -f "$CONF" ]; then
     configured_recipient="$(sed -n 's/^AGE_RECIPIENT=//p' "$CONF" | head -n1)"
 fi
 
-if [ -n "$RECIPIENT" ]; then
-    case "$RECIPIENT" in
-        age1*) : ;;
-        *) die "--recipient must be an age public key (age1...)" ;;
-    esac
-    log "Using the recipient you provided - no key pair generated on this host"
-elif [ -f "$GRAB_IDENTITY" ]; then
-    log "Reusing the existing private key at ${GRAB_IDENTITY}"
+grab_recipient=""
+if [ -f "$GRAB_IDENTITY" ]; then
     chmod 600 "$GRAB_IDENTITY" 2>/dev/null || true
-    RECIPIENT="$(age-keygen -y "$GRAB_IDENTITY")" || die "cannot read recipient from ${GRAB_IDENTITY}"
-elif [ -n "$configured_recipient" ] && [ "$FORCE" -ne 1 ]; then
-    cat >&2 <<EOF
+    grab_recipient="$(age-keygen -y "$GRAB_IDENTITY" 2>/dev/null || true)"
+    if [ -z "$grab_recipient" ]; then
+        die "cannot read a recipient out of ${GRAB_IDENTITY} - move it away and start again"
+    fi
+fi
 
-[install] ERROR: refusing to continue, this would break your backups.
+resolve_key "$configured_recipient" "$grab_recipient"
 
-  ${CONF} already encrypts to this recipient:
-
-      ${configured_recipient}
-
-  There is no private key on this host (already finalized), so generating a new
-  one now would produce a key that does NOT match that recipient. Your existing
-  backups would stay unreadable and the new key would be useless.
-
-  Pick one:
-
-    a) Keep using the existing key - copy its identity back and run:
-
-         $0 --recipient ${configured_recipient}
-
-    b) Really start over on this host. Only if you accept that backups already
-       encrypted with the old recipient can never be read again:
-
-         $0 --force
-
-  To only update the script and the systemd units, use:
-
-         ${SCRIPT_NAME}.sh --update
-
-EOF
-    exit 1
-else
-    log "Generating an age key pair"
+# -----------------------------------------------------------------------------
+# 5. Create and verify the key pair, if that is what we decided
+# -----------------------------------------------------------------------------
+if [ "$NEED_KEYGEN" -eq 1 ]; then
     umask 077
     age-keygen -o "$GRAB_IDENTITY" >/dev/null 2>&1 || die "age-keygen failed"
     chmod 600 "$GRAB_IDENTITY"
@@ -339,16 +531,31 @@ fi
 
 [ -n "$RECIPIENT" ] || die "no age recipient available"
 
-if [ -f "$GRAB_IDENTITY" ]; then
+if [ "$VERIFY_KEYPAIR" -eq 1 ]; then
     if printf 'smoke test\n' | age -r "$RECIPIENT" | age -d -i "$GRAB_IDENTITY" >/dev/null 2>&1; then
         log "Key pair verified (encrypt + decrypt roundtrip OK)"
     else
+        if [ "$NEED_KEYGEN" -eq 1 ]; then
+            rm -f -- "$GRAB_IDENTITY"
+        fi
         die "key pair smoke test failed - refusing to continue"
     fi
 fi
 
 # -----------------------------------------------------------------------------
-# 7. Config
+# 6. Main script
+# -----------------------------------------------------------------------------
+log "Installing ${BIN}"
+install -m 0755 "${SRC_DIR}/${SCRIPT_NAME}.sh" "$BIN" \
+    || die "cannot write ${BIN} (are you root?)"
+
+# -----------------------------------------------------------------------------
+# 7. Directories
+# -----------------------------------------------------------------------------
+install -d -m 0700 "$CONF_DIR"
+
+# -----------------------------------------------------------------------------
+# 8. Config
 # -----------------------------------------------------------------------------
 write_config() {
     local tmp="${CONF}.tmp.$$"
@@ -386,12 +593,15 @@ if [ -f "$CONF" ] && [ "$FORCE" -ne 1 ]; then
     warn "Make sure it contains:"
     warn "    AGE_RECIPIENT=${RECIPIENT}"
     warn "Re-run with --force to overwrite the whole file."
+    if [ "$UPDATE_CONFIG_RECIPIENT" -eq 1 ]; then
+        set_config_recipient
+    fi
 else
     write_config
 fi
 
 # -----------------------------------------------------------------------------
-# 8. systemd
+# 9. systemd
 # -----------------------------------------------------------------------------
 log "Installing systemd units"
 install -m 0644 "${SRC_DIR}/${SCRIPT_NAME}.service" "$SYSTEMD_DIR/"
@@ -412,7 +622,7 @@ log "Preflight: ${SCRIPT_NAME}.sh --dry-run"
 "$BIN" --dry-run || warn "--dry-run reported problems"
 
 # -----------------------------------------------------------------------------
-# 9. Enable the timer, then shout about the private key
+# 10. Enable the timer, then shout about the private key
 # -----------------------------------------------------------------------------
 if [ "$DO_ENABLE" -eq 1 ]; then
     systemctl enable --now "${SCRIPT_NAME}.timer" || die "could not enable the timer"

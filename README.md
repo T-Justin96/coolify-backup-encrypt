@@ -97,7 +97,7 @@ curl -fsSL <url> | sudo bash -s -- --recipient age1...
 
 # pin a release instead of following main
 curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh \
-  | sudo bash -s -- --ref v1.2.0
+  | sudo bash -s -- --ref v1.2.1
 ```
 
 > Piping a script into a root shell means trusting it blindly. If that bothers
@@ -106,11 +106,11 @@ curl -fsSL https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/m
 > ```bash
 > curl -fsSLO https://raw.githubusercontent.com/T-Justin96/coolify-backup-encrypt/main/install.sh
 > less install.sh
-> sudo bash install.sh --ref v1.2.0
+> sudo bash install.sh --ref v1.2.1
 > ```
 
 > `raw.githubusercontent.com` can serve a cached copy for a few minutes after a
-> push. To get exactly the released version, pin it with `--ref v1.2.0`.
+> push. To get exactly the released version, pin it with `--ref v1.2.1`.
 
 ### From a clone
 
@@ -138,9 +138,44 @@ Installer flags:
 | Flag | Effect |
 | --- | --- |
 | `--recipient age1...` | use your own public key; nothing is generated on the host, so there is nothing to finalize |
+| `--keep-key` | keep the recipient already in the config, change nothing about encryption |
+| `--new-key` | deliberately generate a new key pair and update the config (old backups become unreadable) |
 | `--ref <git ref>` | fetch this branch/tag/commit instead of `main` |
 | `--no-enable` | install everything but do not start the timer |
-| `--force` | overwrite an existing config, and allow generating a new key pair |
+| `--no-prompt` | never ask; refuse with instructions instead (for scripts) |
+| `--force` | overwrite the whole existing config |
+| `--help` | usage |
+
+### The one decision worth understanding
+
+Backups are encrypted to a public key, and that key is pinned in
+`/etc/coolify-backup-encrypt.conf`. Replacing it later would make every backup
+encrypted with the old key unreadable, so the installer refuses to guess.
+
+If it finds a config that already pins a recipient but no private key on the
+host, it asks — with the safe answer as the default:
+
+```
+  /etc/coolify-backup-encrypt.conf already encrypts to:
+
+      age192yffpp9qt329...dexeaf2s2e52xp
+
+  There is no private key on this host. What should happen?
+
+    a) keep that key, change nothing about encryption         [default]
+    b) GENERATE A NEW KEY PAIR
+       every backup encrypted with the key above becomes UNREADABLE
+
+  Choose [a/b] (enter = a):
+```
+
+Without a terminal (or with `--no-prompt`) it does not guess either: it stops
+and prints the exact commands. **Nothing is written before that decision** — the
+installer picks the key first and only then touches any file.
+
+The same prompt appears when the private key on the host does not match the
+recipient in the config, which is the other way this can silently go wrong.
+
 ### After the install: where things live
 
 There is nothing to run day to day. The timer encrypts each finished backup
@@ -228,7 +263,7 @@ check failed. That is what makes `OnFailure=` alert you.
 
 ```bash
 sudo coolify-backup-encrypt.sh --update               # follow main
-sudo coolify-backup-encrypt.sh --update --ref v1.2.0  # pin a release
+sudo coolify-backup-encrypt.sh --update --ref v1.2.1  # pin a release
 ```
 
 It downloads the script and the units, checks that the script is valid bash,
@@ -437,6 +472,8 @@ systemctl daemon-reload && systemctl restart coolify-backup-encrypt.timer
 | `journalctl` shows nothing for the service | Normal. A pass with nothing to do is silent on purpose. Use `--status`. |
 | `NOT ON THIS HOST` lines | Those backups live on another server or are S3-only. See [Multiple servers](#multiple-coolify-servers). |
 | `--status` says `key on host YES` | The bootstrap key is still there. Copy it away, verify it, then run `--finalize`. |
+| The installer stopped halfway, or says `refusing to guess` | Read the message: it names the exact command to continue. `--keep-key` keeps the recipient your backups are already encrypted to (almost always what you want), `--new-key` starts over and makes old backups unreadable. Earlier versions could leave the script replaced but the systemd units stale; `--update` now repairs that (it compares files, not just version numbers). |
+| `bash: --recipient: invalid option` | You piped into bash without `-s --`. It must be `curl ... \| sudo bash -s -- --recipient age1...`, otherwise bash itself swallows the flag. |
 | `systemctl --failed` lists the unit | You got an alert. Look at `journalctl -u coolify-backup-encrypt.service -n 50`. |
 
 ## Self-test

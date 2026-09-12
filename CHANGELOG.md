@@ -2,6 +2,37 @@
 
 Not a formal standard, just a short history.
 
+## 1.2.1 - 2026-09
+
+Fixes for the second half of a real install: a refusal message whose commands
+did not work, and the half-updated host it could leave behind.
+
+- Fixed: the "refusing to guess" message printed `bash --recipient ...`, because
+  it used `$0` - which is `bash` when the installer was piped in. Every command
+  in every message is now correct for the way the installer was started
+  (`sudo bash ./install.sh --keep-key` from a checkout,
+  `curl ... | sudo bash -s -- --keep-key` when piped).
+- Fixed: the installer installed the script *before* deciding which key to use,
+  so refusing left the host half-updated (new script, old systemd units). It now
+  decides first and writes nothing until that is settled.
+- New `--keep-key`: keep the recipient your backups are already encrypted to.
+- New `--new-key`: deliberately start over (old backups become unreadable). Only
+  the `AGE_RECIPIENT` line is rewritten, so the rest of your config survives.
+- New `--no-prompt`: never ask, refuse with instructions instead. For scripts.
+- The installer now asks (a/b, safe default) when the key situation is
+  ambiguous, instead of only failing. It also detects the reverse case: a
+  private key on the host that does not match the configured recipient.
+- Prompts read from `/dev/tty`, never stdin. With `curl | sudo bash`, stdin *is
+  the script*, and a naive `read` would have eaten the rest of it.
+- `--update` compares the installed files with the downloaded ones instead of
+  only the version number, so it repairs a half-finished install.
+- The main script explains that `--recipient` / `--keep-key` / `--new-key` are
+  installer options instead of just saying "unknown option".
+- Installer paths (`BIN`, `CONF`, `SYSTEMD_DIR`, ...) and `REPO_RAW_URL` are
+  overridable now, which is what lets the self-test cover `install.sh` itself.
+- Self-test: new cases for `--update` (offline, against a local source) and for
+  the installer's key decision in both checkout and piped mode.
+
 ## 1.2.0 - 2026-09
 
 Added day-2 management and two correctness fixes that came out of a real

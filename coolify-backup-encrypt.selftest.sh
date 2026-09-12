@@ -448,6 +448,273 @@ run_verify_case() {
     return 0
 }
 
+# A curl that understands file:// - several curl builds (including the Windows
+# one) ship with the file protocol disabled.
+write_fake_curl() { # $1 = workdir
+    cat > "$1/bin/curl" <<'FAKECURL'
+#!/usr/bin/env bash
+src="" dest=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) shift; dest="$1" ;;
+        file://*) src="${1#file://}" ;;
+    esac
+    shift
+done
+[ -n "$src" ] && [ -n "$dest" ] || exit 1
+cp -- "$src" "$dest"
+FAKECURL
+    chmod +x "$1/bin/curl"
+}
+
+# Everything install.sh needs to run in a scratch environment instead of on a
+# real host: a fake root user, a running-looking database container, age, and
+# a systemctl that does nothing.
+write_installer_fakes() { # $1 = workdir
+    local w="$1"
+    mkdir -p "$w/bin"
+
+    printf '#!/usr/bin/env bash\necho 0\n' > "$w/bin/id"
+
+    cat > "$w/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "$*" == *inspect* ]]; then echo true; exit 0; fi
+if [[ "$*" == *psql* ]]; then
+    if [[ "$*" == *information_schema* ]]; then
+        for entry in \
+            scheduled_database_backup_executions.filename \
+            scheduled_database_backup_executions.finished_at \
+            scheduled_database_backup_executions.local_storage_deleted \
+            scheduled_database_backup_executions.status \
+            scheduled_volume_backup_executions.filename \
+            scheduled_volume_backup_executions.finished_at \
+            scheduled_volume_backup_executions.local_storage_deleted \
+            scheduled_volume_backup_executions.status ; do
+            echo "$entry"
+        done
+        exit 0
+    fi
+    [ -n "${FAKE_FILENAMES:-}" ] && [ -f "$FAKE_FILENAMES" ] && cat "$FAKE_FILENAMES"
+    exit 0
+fi
+exit 0
+FAKE
+
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$w/bin/systemctl"
+
+    cat > "$w/bin/age-keygen" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-o" ]; then
+    printf '# fake key\n# public key: %s\nAGE-SECRET-KEY-1FAKEFAKEFAKE\n' "${FAKE_RECIPIENT:-age1fake}" > "$2"
+else
+    printf '%s\n' "${FAKE_RECIPIENT:-age1fake}"
+fi
+FAKE
+
+    cat > "$w/bin/age" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "$*" == *--decrypt* ]] || [[ "$*" == *-d* ]]; then base64 -d; else base64; fi
+FAKE
+
+    chmod +x "$w/bin/id" "$w/bin/docker" "$w/bin/systemctl" "$w/bin/age-keygen" "$w/bin/age"
+}
+
+# --update must recognise an unchanged install and repair a changed one.
+# Runs fully offline: REPO_RAW_URL is pointed at a local directory.
+run_update_case() {
+    local w repo installed out
+
+    w="$(mktemp -d)"
+    repo="$(mktemp -d)"
+    prepare_work "$w"
+    configure_crypt "$w"
+
+    echo "== case: --update (offline, file:// repo) =="
+
+    # Fake "remote": refs live in a subdirectory named after the ref.
+    mkdir -p "${repo}/main" "${w}/systemd"
+    cp "$SCRIPT" "${repo}/main/coolify-backup-encrypt.sh"
+    cp "${ROOT}/coolify-backup-encrypt.service" "${repo}/main/"
+    cp "${ROOT}/coolify-backup-encrypt-alert.service" "${repo}/main/"
+    cp "${ROOT}/coolify-backup-encrypt.timer" "${repo}/main/"
+
+    # A minimal curl that understands file:// - several curl builds (including
+    # the Windows one) ship with the file protocol disabled.
+    write_fake_curl "$w"
+
+    # What is "installed" right now.
+    installed="${w}/installed.sh"
+    cp "$SCRIPT" "$installed"
+    cp "${ROOT}/coolify-backup-encrypt.service" "${w}/systemd/"
+    cp "${ROOT}/coolify-backup-encrypt-alert.service" "${w}/systemd/"
+    cp "${ROOT}/coolify-backup-encrypt.timer" "${w}/systemd/"
+
+    {
+        echo "BIN_PATH=${installed}"
+        echo "SYSTEMD_DIR=${w}/systemd"
+        echo "REPO_RAW_URL=file://${repo}"
+    } >> "${w}/conf"
+
+    PATH="$w/bin:$PATH"
+    FAKE_FILENAMES="$w/filenames"
+    CONF_FILE="$w/conf"
+    export PATH FAKE_FILENAMES CONF_FILE
+
+    out="$(bash "$SCRIPT" --update 2>&1)"
+    if ! printf '%s' "$out" | grep -q 'Already up to date'; then
+        fail "--update did not recognise an unmodified install: ${out}"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    # Simulate a half-finished install: the script is current, one unit is stale.
+    printf '\n# tampered\n' >> "${w}/systemd/coolify-backup-encrypt.timer"
+
+    out="$(bash "$SCRIPT" --update 2>&1)"
+    if ! printf '%s' "$out" | grep -q 'repairing'; then
+        fail "--update did not repair a differing unit: ${out}"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! cmp -s "${repo}/main/coolify-backup-encrypt.timer" "${w}/systemd/coolify-backup-encrypt.timer"; then
+        fail "--update did not actually restore the unit file"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    echo "   PASS (detects up-to-date, repairs a differing unit)"
+    rm -rf "$w" "$repo"
+    return 0
+}
+
+# The installer must never write anything before it has decided which key to use,
+# and every command in its refusal has to be copy-pasteable. This reproduces the
+# real failure: "curl | sudo bash" then being told to run "bash --recipient ...".
+run_installer_case() {
+    local w repo out rc
+
+    w="$(mktemp -d)"
+    repo="$(mktemp -d)"
+    prepare_work "$w"
+    write_installer_fakes "$w"
+
+    mkdir -p "${w}/systemd" "${w}/confdir" "${repo}/main"
+    : > "${w}/empty-filenames"
+
+    cp "$SCRIPT" "${repo}/main/coolify-backup-encrypt.sh"
+    cp "${ROOT}/coolify-backup-encrypt.service" "${repo}/main/"
+    cp "${ROOT}/coolify-backup-encrypt-alert.service" "${repo}/main/"
+    cp "${ROOT}/coolify-backup-encrypt.timer" "${repo}/main/"
+    write_fake_curl "$w"
+
+    PATH="$w/bin:$PATH"
+    export PATH
+    export BIN="${w}/install-bin.sh"
+    export CONF="${w}/installer.conf"
+    export CONF_DIR="${w}/confdir"
+    export GRAB_IDENTITY="${w}/grab.txt"
+    export SYSTEMD_DIR="${w}/systemd"
+    export BACKUP_ROOT="$w"
+    export COOLIFY_ENV_FILE="${w}/nonexistent.env"
+    export DB_CONTAINER=fake
+    export FAKE_FILENAMES="${w}/empty-filenames"
+    export FAKE_RECIPIENT="age1newnewnewnewnewnewnewnewnewnewnewnewnewnewnewnew"
+    export REPO_RAW_URL="file://${repo}"
+
+    echo "== case: installer refuses to guess (from a checkout) =="
+    printf 'AGE_RECIPIENT=age1configuredconfiguredconfiguredconfigured\nMAX_LOAD=3\n' > "$CONF"
+
+    out="$(bash "${ROOT}/install.sh" --no-enable --no-prompt 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "the installer guessed instead of refusing"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if [ -e "$BIN" ]; then
+        fail "the installer installed the script before deciding which key to use"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q -- '--keep-key'; then
+        fail "the refusal does not mention --keep-key"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if printf '%s' "$out" | grep -qE 'bash --(keep-key|new-key|recipient)'; then
+        fail "the refusal suggests 'bash --flag', which cannot work"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    echo "== case: installer refuses to guess (piped like curl | bash) =="
+    out="$(cd "$ROOT" && cat install.sh | bash -s -- --no-enable --no-prompt 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "the piped installer guessed instead of refusing"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! printf '%s' "$out" | grep -q 'sudo bash -s --'; then
+        fail "the piped refusal does not show the '-s --' form: ${out}"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if [ -e "$BIN" ]; then
+        fail "the piped installer wrote the script before deciding"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    echo "== case: installer --keep-key =="
+    if ! bash "${ROOT}/install.sh" --no-enable --no-prompt --keep-key > "${w}/keep.log" 2>&1; then
+        fail "--keep-key failed: $(cat "${w}/keep.log")"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if [ ! -f "$BIN" ]; then
+        fail "--keep-key did not install the script"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if [ -e "$GRAB_IDENTITY" ]; then
+        fail "--keep-key generated a key pair anyway"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! grep -q '^AGE_RECIPIENT=age1configuredconfiguredconfiguredconfigured$' "$CONF"; then
+        fail "--keep-key changed the configured recipient"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    echo "== case: installer --new-key =="
+    if ! bash "${ROOT}/install.sh" --no-enable --no-prompt --new-key > "${w}/new.log" 2>&1; then
+        fail "--new-key failed: $(cat "${w}/new.log")"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if [ ! -f "$GRAB_IDENTITY" ]; then
+        fail "--new-key did not create a key pair"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! grep -q "^AGE_RECIPIENT=${FAKE_RECIPIENT}$" "$CONF"; then
+        fail "--new-key did not update AGE_RECIPIENT in the config"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+    if ! grep -q '^MAX_LOAD=3$' "$CONF"; then
+        fail "--new-key rewrote the whole config instead of just the recipient line"
+        rm -rf "$w" "$repo"
+        return 1
+    fi
+
+    echo "   PASS (refuses before writing, correct commands, keep-key and new-key work)"
+    rm -rf "$w" "$repo"
+    return 0
+}
+
 run_cli_case() {
     echo "== case: --help / --version =="
 
@@ -531,6 +798,8 @@ run_finalize_case
 run_verify_case
 run_failure_exit_case
 run_missing_dedupe_case
+run_update_case
+run_installer_case
 
 if [ "$FAILED" -eq 0 ]; then
     echo "ALL TESTS PASSED"

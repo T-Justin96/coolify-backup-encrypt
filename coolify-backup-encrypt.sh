@@ -69,7 +69,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 
 # Where this script and its units live. Overridable so the self-test can point
 # them at a scratch directory.
@@ -78,9 +78,10 @@ BIN_PATH="${BIN_PATH:-/usr/local/bin/coolify-backup-encrypt.sh}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 UNIT_NAME="coolify-backup-encrypt"
 
-# For --update: where to fetch new versions from.
+# For --update: where to fetch new versions from. Overridable so the self-test
+# can point it at a local directory instead of the network.
 REPO_SLUG="T-Justin96/coolify-backup-encrypt"
-REPO_RAW_URL="https://raw.githubusercontent.com/${REPO_SLUG}"
+REPO_RAW_URL="${REPO_RAW_URL:-https://raw.githubusercontent.com/${REPO_SLUG}}"
 CBX_REF="${CBX_REF:-main}"
 
 CONF_FILE="${CONF_FILE:-/etc/coolify-backup-encrypt.conf}"
@@ -594,7 +595,7 @@ fetch_file() { # $1 = url, $2 = destination
 }
 
 do_update() {
-    local tmp ref="$CBX_REF" new_version old_version f
+    local tmp ref="$CBX_REF" new_version old_version f differs=0
 
     tmp="$(mktemp -d)" || die "mktemp failed"
     trap 'rm -rf -- "$tmp"' EXIT
@@ -615,12 +616,35 @@ do_update() {
     [ -n "$new_version" ] || die "downloaded ${UNIT_NAME}.sh has no SCRIPT_VERSION - aborted"
 
     old_version="$SCRIPT_VERSION"
-    if [ "$new_version" = "$old_version" ] && [ "$FORCE" -ne 1 ]; then
-        log "Already at ${old_version} (ref ${ref}). Nothing to do - use --force to reinstall anyway."
+
+    # Compare what is actually installed with what we downloaded - not just the
+    # version number. A half-finished install (new script, old units) has to be
+    # repairable, and --update is how you repair it.
+    if ! command -v cmp >/dev/null 2>&1; then
+        differs=1
+    else
+        if [ ! -f "$BIN_PATH" ] || ! cmp -s "${tmp}/${UNIT_NAME}.sh" "$BIN_PATH"; then
+            differs=1
+        fi
+        for f in "${UNIT_NAME}.service" "${UNIT_NAME}-alert.service" "${UNIT_NAME}.timer"; do
+            if [ ! -f "${SYSTEMD_DIR}/${f}" ] || ! cmp -s "${tmp}/${f}" "${SYSTEMD_DIR}/${f}"; then
+                differs=1
+            fi
+        done
+    fi
+
+    if [ "$differs" -eq 0 ] && [ "$FORCE" -ne 1 ]; then
+        log "Already up to date: ${old_version} (ref ${ref}), script and units identical."
         return 0
     fi
 
-    log "Installing ${old_version} -> ${new_version}"
+    if [ "$new_version" != "$old_version" ]; then
+        log "Updating ${old_version} -> ${new_version}"
+    elif [ "$differs" -eq 1 ]; then
+        log "Version ${old_version} is current, but the installed files differ - repairing."
+    else
+        log "Reinstalling ${old_version} (--force)"
+    fi
 
     # Deliberately NOT touching: ${CONF_FILE}, ${AGE_IDENTITY}, ${GRAB_IDENTITY}.
     # An update must never change which key your backups are encrypted to.
@@ -955,6 +979,11 @@ main() {
                 [ "$#" -ge 2 ] || die "usage: $0 --decrypt-to OUTPUT ENCRYPTED_FILE"
                 do_decrypt_to "$1" "$2"
                 exit 0
+                ;;
+            --recipient|--keep-key|--new-key|--no-enable)
+                die "'$1' is an install.sh option, not a coolify-backup-encrypt.sh option.
+    To (re)install, run the installer - note the '-s --':
+      curl -fsSL ${REPO_RAW_URL}/${CBX_REF}/install.sh | sudo bash -s -- $1"
                 ;;
             *)
                 die "unknown option: $1"
